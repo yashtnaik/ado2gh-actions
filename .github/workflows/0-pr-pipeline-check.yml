@@ -1,0 +1,206 @@
+name: 0-pr-pipeline-check
+
+on:
+  workflow_dispatch:
+    inputs:
+      csv_path:
+        description: 'Path to repos CSV file'
+        required: false
+        default: 'repos.csv'
+      trigger_migration:
+        description: 'Automatically trigger migration after successful check?'
+        required: false
+        default: 'false'
+        type: choice
+        options:
+          - 'true'
+          - 'false'
+      
+jobs:
+  readiness-check:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    environment: PAT tokens
+    outputs:
+      check-passed: ${{ steps.check-result.outputs.passed }}
+      has-blockers: ${{ steps.check-result.outputs.has-blockers }}
+    
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+      
+      - name: Run Migration Readiness Check
+        id: run-check
+        shell: pwsh
+        env:
+          ADO_PAT: ${{ secrets.ADO_PAT }}
+        run: |
+          Write-Host "==================================================" -ForegroundColor Cyan
+          Write-Host "  Azure DevOps to GitHub Migration Readiness Check" -ForegroundColor Cyan
+          Write-Host "==================================================" -ForegroundColor Cyan
+          Write-Host ""
+          
+          # Execute readiness check script with CSV path
+          $ErrorActionPreference = 'Continue'
+          
+          # Capture the output
+          $output = & .\scripts\0_pr_pipeline_check.ps1 -CsvPath "${{ github.event.inputs.csv_path }}" 2>&1
+          $output | ForEach-Object { Write-Host $_ }
+          
+          # Check if output contains blockers
+          $outputString = $output | Out-String
+          $hasBlockers = $outputString -match '\[BLOCKER\]'
+          
+          # Store results
+          if ($hasBlockers) {
+            Write-Host "`n❌ BLOCKERS FOUND - Migration should not proceed" -ForegroundColor Red
+            echo "READINESS_CHECK_PASSED=false" >> $env:GITHUB_ENV
+            echo "HAS_BLOCKERS=true" >> $env:GITHUB_ENV
+          } else {
+            Write-Host "`n✅ NO BLOCKERS FOUND - Safe to proceed with migration" -ForegroundColor Green
+            echo "READINESS_CHECK_PASSED=true" >> $env:GITHUB_ENV
+            echo "HAS_BLOCKERS=false" >> $env:GITHUB_ENV
+          }
+      
+      - name: Set Check Result Output
+        id: check-result
+        shell: pwsh
+        run: |
+          $passed = $env:READINESS_CHECK_PASSED
+          $hasBlockers = $env:HAS_BLOCKERS
+          
+          echo "passed=$passed" >> $env:GITHUB_OUTPUT
+          echo "has-blockers=$hasBlockers" >> $env:GITHUB_OUTPUT
+          
+          if ($passed -eq 'false') {
+            Write-Host "::warning::Readiness check found blockers. Migration is NOT recommended."
+          } else {
+            Write-Host "::notice::Readiness check passed! You can proceed with migration."
+          }
+      
+      - name: Generate Readiness Summary
+        if: always()
+        shell: pwsh
+        run: |
+          $passed = $env:READINESS_CHECK_PASSED
+          $hasBlockers = $env:HAS_BLOCKERS
+          $triggerMigration = "${{ github.event.inputs.trigger_migration }}"
+          
+          if ($passed -eq 'true' -and $hasBlockers -eq 'false') {
+            $statusIcon = "✅"
+            $statusText = "PASSED"
+            $statusColor = "🟢"
+            $recommendation = "**You can safely proceed with the migration.**"
+          } else {
+            $statusIcon = "❌"
+            $statusText = "FAILED"
+            $statusColor = "🔴"
+            $recommendation = "**Migration is NOT recommended. Please resolve the blockers first.**"
+          }
+          
+          $summary = @"
+          # 🔍 Migration Readiness Check Results
+          
+          ## Overall Status: $statusColor $statusText
+          
+          The readiness check has been completed for repositories in: ``${{ github.event.inputs.csv_path }}``
+          
+          ### Validation Checks Performed:
+          
+          - ✅ **Active Pull Requests**: Checked if any PRs are still open
+          - ✅ **Running Build Pipelines**: Verified no builds are in progress
+          - ✅ **Running Release Pipelines**: Ensured no releases are active
+          - ✅ **ADO PAT Authentication**: Validated access token
+          
+          ### Recommendation
+          
+          $recommendation
+          
+          ### Next Steps
+          
+          "@
+          
+          if ($passed -eq 'true') {
+            $summary += @"
+          
+          #### ✅ Ready to Migrate
+          
+          1. **Manual Trigger**: Go to [Migration Workflow](../../actions/workflows/migration-concurrent.yml) and click "Run workflow"
+          2. **Review CSV**: Ensure ``${{ github.event.inputs.csv_path }}`` contains the correct repositories
+          3. **Choose Concurrency**: Select 1-5 concurrent migrations based on your needs
+          
+          "@
+            
+            if ($triggerMigration -eq 'true') {
+              $summary += @"
+          
+          #### 🚀 Auto-Trigger Enabled
+          
+          The migration workflow will be automatically triggered after this check completes.
+          "@
+            }
+          } else {
+            $summary += @"
+          
+          #### ❌ Action Required
+          
+          1. **Review Blockers**: Check the detailed output above for specific issues
+          2. **Resolve Issues**: 
+             - Complete or close active pull requests
+             - Wait for running builds to finish
+             - Wait for running releases to complete
+          3. **Re-run Check**: Run this workflow again after resolving issues
+          4. **Contact Team**: If you need help resolving blockers
+          
+          ⚠️ **Warning**: You can still run the migration workflow manually, but it may fail or cause issues.
+          "@
+          }
+          
+          $summary += @"
+          
+          ---
+          
+          📅 **Check Date**: $(Get-Date -Format "yyyy-MM-dd HH:mm:ss UTC")
+          📁 **CSV File**: ``${{ github.event.inputs.csv_path }}``
+          🔄 **Auto-Trigger Migration**: $triggerMigration
+          "@
+          
+          $summary | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8
+      
+      - name: Fail if Blockers Found (Optional)
+        if: env.HAS_BLOCKERS == 'true'
+        shell: pwsh
+        run: |
+          Write-Host "::warning::Readiness check completed, but blockers were found. Workflow will not fail, but migration is not recommended."
+          # Commenting out exit 1 so workflow doesn't fail, just warns
+          # exit 1
+  
+  trigger-migration:
+    needs: readiness-check
+    if: |
+      github.event.inputs.trigger_migration == 'true' && 
+      needs.readiness-check.outputs.check-passed == 'true' &&
+      needs.readiness-check.outputs.has-blockers == 'false'
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Trigger Migration Workflow
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GH_PAT }}
+          script: |
+            console.log('✅ Readiness check passed! Triggering migration workflow...');
+            
+            await github.rest.actions.createWorkflowDispatch({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              workflow_id: '1-migration.yml',
+              ref: 'main',
+              inputs: {
+                csv_path: '${{ github.event.inputs.csv_path }}',
+                max_concurrent: '3'
+              }
+            });
+            
+            console.log('🚀 Migration workflow triggered successfully!');
+            console.log('Go to Actions tab to monitor the migration progress.');
