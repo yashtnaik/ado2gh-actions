@@ -1,9 +1,6 @@
 name: 0-pr-pipeline-check
 
 on:
-  push:
-    branches:
-      - main
   workflow_dispatch:
     inputs:
       csv_path:
