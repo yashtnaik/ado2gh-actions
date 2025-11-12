@@ -1,0 +1,23 @@
+# Migration outputs
+migration-*.txt
+repo_migration_output-*.csv
+
+# PowerShell
+*.ps1~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Editor directories
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Logs
+*.log
+
+# Temporary files
+*.tmp
