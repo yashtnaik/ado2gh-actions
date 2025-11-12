@@ -21,7 +21,7 @@ jobs:
   generate-inventory:
     name: Generate Inventory & Upload repos.csv
     runs-on: windows-latest
-    timeout-minutes: 30
+    timeout-minutes: 360
     environment: PAT tokens
 
     steps:
