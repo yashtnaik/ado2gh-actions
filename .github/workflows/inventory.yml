@@ -4,17 +4,18 @@ on:
   workflow_dispatch:
     inputs:
       ado_org:
-        description: 'Azure DevOps organization (e.g., contoso)'
-        required: true
-        type: string
-      teamproject:
-        description: 'Azure DevOps Team Project (optional: to scope inventory)'
+        description: 'Azure DevOps organization (e.g., yashtnaik). Leave blank to scan all orgs ADO_PAT can access.'
         required: false
         type: string
-      output_file:
-        description: 'Output CSV file name'
+      minimal:
+        description: 'Use --minimal to speed up inventory (fewer columns)'
         required: false
-        default: 'repos.csv'
+        default: false
+        type: boolean
+      artifact_name:
+        description: 'Artifact base name'
+        required: false
+        default: 'repo-inventory-csv'
         type: string
 
 permissions:
@@ -23,96 +24,93 @@ permissions:
 
 jobs:
   generate-inventory:
-    name: Generate ADO → GitHub Inventory (CSV)
+    name: Generate Inventory & Upload repos.csv
     runs-on: windows-latest
     timeout-minutes: 30
     environment: PAT tokens
 
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      # No checkout: we do not reference any files from the repository
 
-      - name: Setup GitHub CLI (verify)
+      - name: Verify GitHub CLI
         shell: pwsh
-        run: |
-          Write-Host "GitHub CLI Version:" -ForegroundColor Cyan
-          gh --version
-          Write-Host "`nAuthentication Status:" -ForegroundColor Cyan
-          gh auth status
         env:
           GH_TOKEN: ${{ secrets.GH_PAT }}
+        run: |
+          Write-Host "GitHub CLI version:" -ForegroundColor Cyan
+          gh --version
+          Write-Host "`nAuthentication status:" -ForegroundColor Cyan
+          gh auth status
 
       - name: Install gh-ado2gh extension
         shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT }}
         run: |
           Write-Host "Installing gh-ado2gh extension..." -ForegroundColor Cyan
           gh extension install github/gh-ado2gh
-          Write-Host "`nVerifying:" -ForegroundColor Cyan
+          Write-Host "`nInstalled extension version:" -ForegroundColor Cyan
           gh ado2gh --version
-        env:
-          GH_TOKEN: ${{ secrets.GH_PAT }}
 
-      - name: Generate inventory CSV (using gh-ado2gh)
+      - name: Run inventory-report
+        id: run_inventory
         shell: pwsh
         env:
           GH_TOKEN: ${{ secrets.GH_PAT }}
-          ADO_PAT: ${{ secrets.ADO_PAT }}
+          ADO_PAT: ${{ secrets.ADO_PAT }}  # required by inventory-report
         run: |
           $ErrorActionPreference = 'Stop'
 
-          $adoOrg      = "${{ inputs.ado_org }}"
-          $teamProject = "${{ inputs.teamproject }}"
-          $outFile     = "${{ inputs.output_file }}"
+          $adoOrg   = "${{ inputs.ado_org }}"
+          $minimal  = "${{ inputs.minimal }}"
 
-          if ([string]::IsNullOrWhiteSpace($outFile)) { $outFile = "repos.csv" }
-
-          Write-Host "[INFO] Generating inventory for ADO org: $adoOrg" -ForegroundColor Cyan
-          if (![string]::IsNullOrWhiteSpace($teamProject)) {
-            Write-Host "[INFO] Scoping to Team Project: $teamProject" -ForegroundColor Cyan
+          $cmd = "gh ado2gh inventory-report"
+          if ($adoOrg -and $adoOrg.Trim().Length -gt 0) {
+            $cmd += " --ado-org `"$adoOrg`""
+          }
+          if ($minimal -eq "true") {
+            $cmd += " --minimal"
           }
 
-          # ---------------------------------------------------------------------------------
-          # Choose ONE of the following gh-ado2gh inventory commands used in your environment
-          # Uncomment the correct line and leave others commented. The extension evolves,
-          # so subcommand names may differ across versions (list-repos / audit-repos, etc.).
-          # ---------------------------------------------------------------------------------
+          Write-Host "[INFO] Executing:" -ForegroundColor Cyan
+          Write-Host $cmd
 
-          # Option A: List repositories (CSV)
-          # gh ado2gh list-repos --ado-org "$adoOrg" --team-project "$teamProject" --format csv > "$outFile"
+          # Run the inventory command (generates multiple CSVs: orgs.csv, teamprojects.csv, repos.csv, pipelines.csv, ...)
+          iex $cmd
 
-          # Option B: Audit repositories (CSV)
-          # gh ado2gh audit-repos --ado-org "$adoOrg" --team-project "$teamProject" --format csv > "$outFile"
-
-          # Option C: If your extension expects flags without team-project:
-          # gh ado2gh list-repos --ado-org "$adoOrg" --format csv > "$outFile"
-
-          # Fallback check (if nothing was written, fail loudly)
-          if (-not (Test-Path -Path $outFile)) {
-            Write-Error "[ERROR] Inventory CSV not created. Ensure the correct gh-ado2gh subcommand is uncommented and valid."
+          # Find repos.csv anywhere under the working directory
+          $repoCsv = Get-ChildItem -Path . -Recurse -Filter "repos.csv" | Select-Object -First 1
+          if (-not $repoCsv) {
+            Write-Error "[ERROR] Could not find repos.csv after inventory-report. Ensure the command completed successfully."
           }
 
-          # Optional: Preview first few lines
-          Write-Host "`n=== CSV Preview (Top 5 rows) ===" -ForegroundColor Cyan
-          Import-Csv -Path $outFile | Select-Object -First 5 | Format-Table -AutoSize
+          Write-Host "[INFO] Found repos.csv at: $($repoCsv.FullName)" -ForegroundColor Green
+
+          # Copy to a known location for artifact upload
+          Copy-Item -Path $repoCsv.FullName -Destination .\repos.csv -Force
+
+          # Output path for next step
+          "repo_csv_path=$((Resolve-Path .\repos.csv).Path)" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
+          # Optional: Preview top 5 rows
+          Write-Host "`n=== repos.csv preview (Top 5 rows) ===" -ForegroundColor Cyan
+          Import-Csv .\repos.csv | Select-Object -First 5 | Format-Table -AutoSize
 
       - name: Upload repos.csv artifact (only)
         uses: actions/upload-artifact@v4
         with:
-          name: repo-inventory-csv-${{ github.run_number }}
-          path: ${{ inputs.output_file }}
+          name: ${{ inputs.artifact_name }}-${{ github.run_number }}
+          path: ${{ steps.run_inventory.outputs.repo_csv_path }}
           retention-days: 30
           if-no-files-found: error
 
-      - name: Workflow summary
+      - name: Summary
         if: always()
         shell: pwsh
         run: |
-          $outFile = "${{ inputs.output_file }}"
-          Write-Host "## Inventory Report" >> $env:GITHUB_STEP_SUMMARY
+          Write-Host "## Inventory Complete" >> $env:GITHUB_STEP_SUMMARY
           Write-Host "" >> $env:GITHUB_STEP_SUMMARY
-          Write-Host "**Run Number:** ${{ github.run_number }}" >> $env:GITHUB_STEP_SUMMARY
-          Write-Host "**ADO Org:** ${{ inputs.ado_org }}" >> $env:GITHUB_STEP_SUMMARY
-          Write-Host "**Team Project:** ${{ inputs.teamproject }}" >> $env:GITHUB_STEP_SUMMARY
-          Write-Host "**Output File:** $outFile" >> $env:GITHUB_STEP_SUMMARY
+          Write-Host "**Command:** gh ado2gh inventory-report ${{ inputs.ado_org && format('--ado-org {0}', inputs.ado_org) || '' }} ${{ inputs.minimal && '--minimal' || '' }}" >> $env:GITHUB_STEP_SUMMARY
+          Write-Host "**Artifact:** `${{ inputs.artifact_name }}-${{ github.run_number }}` (contains only \`repos.csv\`)" >> $env:GITHUB_STEP_SUMMARY
           Write-Host "" >> $env:GITHUB_STEP_SUMMARY
-          Write-Host "📦 Download **repos.csv** from the Artifacts section, modify it as needed (e.g., add \`github_org\`, \`github_repo\`, \`gh_repo_visibility\`) and re-upload to the repo for the migration workflows." >> $env:GITHUB_STEP_SUMMARY
+          Write-Host "📥 Download **repos.csv** from Artifacts, modify as needed, and use it for migration/validation workflows." >> $env:GITHUB_STEP_SUMMARY
