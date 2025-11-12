@@ -275,4 +275,3 @@ if ($failed.Count -gt 0) {
     Write-Host "[WARNING] Migration completed with $($failed.Count) failures" -ForegroundColor Yellow
     # Don't exit with error - let workflow handle it
 }
-
