@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       ado_org:
-        description: 'Azure DevOps organization (e.g., yashtnaik). Leave blank to scan all orgs ADO_PAT can access.'
+        description: 'Azure DevOps organization'
         required: false
         type: string
       artifact_name:
