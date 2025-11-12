@@ -1,277 +1,249 @@
-# ADO -> GitHub parallel migration runner (GitHub Actions optimized)
-# - Configurable via parameters for GitHub Actions workflow
-# - Keeps your status bar and CSV writes
-# - Ensures background job emits only the final result object (no log noise on the output stream)
-# - Robust Receive-Job parsing so $failed increments correctly
+name: 1-migration
 
-param(
-    [Parameter(Mandatory=$false)]
-    [int]$MaxConcurrent = 3,
+on:
+  workflow_dispatch:
+    inputs:
+      max_concurrent:
+        description: 'Maximum concurrent migrations (1-5)'
+        required: false
+        default: '3'
+        type: choice
+        options:
+          - '1'
+          - '2'
+          - '3'
+          - '4'
+          - '5'
+      csv_path:
+        description: 'Path to repos CSV file'
+        required: false
+        default: 'repos.csv'
+      trigger_validation:
+        description: 'Automatically trigger validation after migration'
+        required: false
+        default: false
+        type: boolean
+  workflow_call:
+    inputs:
+      max_concurrent:
+        description: 'Maximum concurrent migrations (1-5)'
+        required: false
+        default: '3'
+        type: string
+      csv_path:
+        description: 'Path to repos CSV file'
+        required: false
+        default: 'repos.csv'
+        type: string
+      trigger_validation:
+        description: 'Automatically trigger validation after migration'
+        required: false
+        default: false
+        type: boolean
+      
+jobs:
+  migrate-repositories:
+    runs-on: windows-latest
+    timeout-minutes: 360  # 6 hours (GitHub Free/Pro/Team limit)
+    # Note: GitHub Enterprise supports up to 24 hours (1,440 minutes)
+    # Adjust based on your GitHub plan
+    environment: PAT tokens
     
-    [Parameter(Mandatory=$false)]
-    [string]$CsvPath = "repos.csv",
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+      
+      - name: Setup GitHub CLI
+        run: |
+          Write-Host "GitHub CLI Version:" -ForegroundColor Cyan
+          gh --version
+          
+          Write-Host "`nAuthentication Status:" -ForegroundColor Cyan
+          gh auth status
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT }}
+      
+      - name: Install ADO2GH Extension
+        run: |
+          Write-Host "Installing gh-ado2gh extension..." -ForegroundColor Cyan
+          gh extension install github/gh-ado2gh
+          
+          Write-Host "`nVerifying installation:" -ForegroundColor Cyan
+          gh ado2gh --version
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT }}
+      
+      - name: Validate CSV File
+        shell: pwsh
+        run: |
+          $csvPath = "${{ inputs.csv_path }}"
+          
+          if (-not (Test-Path $csvPath)) {
+            Write-Host "[ERROR] CSV file not found: $csvPath" -ForegroundColor Red
+            exit 1
+          }
+          
+          $repos = Import-Csv -Path $csvPath
+          Write-Host "[INFO] Found $($repos.Count) repositories to migrate" -ForegroundColor Green
+          
+          # Validate required columns
+          $requiredColumns = @('org', 'teamproject', 'repo', 'github_org', 'github_repo', 'gh_repo_visibility')
+          $missingColumns = $requiredColumns | Where-Object { $_ -notin $repos[0].PSObject.Properties.Name }
+          
+          if ($missingColumns) {
+            Write-Host "[ERROR] Missing required columns: $($missingColumns -join ', ')" -ForegroundColor Red
+            exit 1
+          }
+          
+          Write-Host "[SUCCESS] CSV validation passed" -ForegroundColor Green
+      
+      - name: Run Concurrent Migration
+        shell: pwsh
+        env:
+          GH_PAT: ${{ secrets.GH_PAT }}
+          ADO_PAT: ${{ secrets.ADO_PAT }}
+          GH_TOKEN: ${{ secrets.GH_PAT }}
+        run: |
+          # Execute migration script with parameters
+          .\scripts\1_migration.ps1 `
+            -MaxConcurrent ${{ inputs.max_concurrent }} `
+            -CsvPath "${{ inputs.csv_path }}"
+      
+      - name: Generate Workflow Summary
+        if: always()
+        shell: pwsh
+        run: |
+          # Find the most recent output CSV
+          $outputCsv = Get-ChildItem -Filter "repo_migration_output-*.csv" | 
+                       Sort-Object LastWriteTime -Descending | 
+                       Select-Object -First 1
+          
+          if ($outputCsv) {
+            $results = Import-Csv -Path $outputCsv.FullName
+            
+            $total = $results.Count
+            $success = ($results | Where-Object { $_.Migration_Status -eq 'Success' }).Count
+            $failed = ($results | Where-Object { $_.Migration_Status -eq 'Failure' }).Count
+            $pending = ($results | Where-Object { $_.Migration_Status -eq 'Pending' }).Count
+            
+            $successRate = if ($total -gt 0) { [math]::Round(($success / $total) * 100, 2) } else { 0 }
+            
+            # Create summary markdown
+            $summary = @"
+          # 🚀 Migration Execution Summary
+          
+          ## 📊 Overall Statistics
+          - **Total Repositories**: $total
+          - **Successfully Migrated**: ✅ $success
+          - **Failed Migrations**: ❌ $failed
+          - **Pending/Not Started**: ⏳ $pending
+          - **Success Rate**: $successRate%
+          - **Concurrent Jobs**: ${{ inputs.max_concurrent }}
+          
+          ## 📁 Artifacts
+          - All migration logs available in artifacts section below
+          - Output CSV: ``$($outputCsv.Name)``
+          
+          "@ 
+            
+            # Add failed migrations table if any
+            if ($failed -gt 0) {
+              $summary += "`n## ❌ Failed Migrations`n`n"
+              $summary += "| Repository | ADO Org | ADO Team Project | GitHub Org | Log File |`n"
+              $summary += "|------------|---------|------------------|------------|----------|`n"
+              
+              $failedRepos = $results | Where-Object { $_.Migration_Status -eq 'Failure' }
+              foreach ($repo in $failedRepos) {
+                $summary += "| $($repo.repo) | $($repo.org) | $($repo.teamproject) | $($repo.github_org) | $($repo.Log_File) |`n"
+              }
+            }
+            
+            # Add successful migrations summary
+            if ($success -gt 0) {
+              $summary += "`n## ✅ Successfully Migrated Repositories`n`n"
+              $successRepos = $results | Where-Object { $_.Migration_Status -eq 'Success' }
+              $summary += "Total: $success repositories migrated successfully`n`n"
+              
+              # Show first 10 successful migrations
+              $showCount = [Math]::Min(10, $success)
+              $summary += "| Repository | GitHub URL |`n"
+              $summary += "|------------|------------|`n"
+              
+              $successRepos | Select-Object -First $showCount | ForEach-Object {
+                $githubUrl = "https://github.com/$($_.github_org)/$($_.github_repo)"
+                $summary += "| $($_.repo) | $githubUrl |`n"
+              }
+              
+              if ($success -gt 10) {
+                $summary += "`n*... and $($success - 10) more*`n"
+              }
+            }
+            
+            # Write to GitHub Actions summary
+            $summary | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8
+            
+            Write-Host $summary
+          } else {
+            Write-Host "[WARNING] No output CSV found" -ForegroundColor Yellow
+          }
+      
+      - name: Upload Migration Logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: migration-logs-${{ github.run_id }}
+          path: migration-*.txt
+          retention-days: 90
+          if-no-files-found: warn
+      
+      - name: Upload Output CSV
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: migration-output-csv-${{ github.run_id }}
+          path: repo_migration_output-*.csv
+          retention-days: 90
+          if-no-files-found: error
+      
+      - name: Check for Failures
+        if: always()
+        shell: pwsh
+        run: |
+          $outputCsv = Get-ChildItem -Filter "repo_migration_output-*.csv" |
+                       Sort-Object LastWriteTime -Descending |
+                       Select-Object -First 1
+
+          if ($outputCsv) {
+            $results = Import-Csv -Path $outputCsv.FullName
+            $failed = ($results | Where-Object { $_.Migration_Status -eq 'Failure' }).Count
+
+            if ($failed -gt 0) {
+              Write-Host "::warning::$failed repositories failed to migrate. Check the logs for details." -ForegroundColor Yellow
+              # Don't fail the workflow, just warn
+            } else {
+              Write-Host "::notice::All migrations completed successfully!" -ForegroundColor Green
+            }
+          }
+  
+  trigger-validation:
+    name: Trigger Migration Validation
+    needs: migrate-repositories
+    if: github.event.inputs.trigger_validation == 'true' || inputs.trigger_validation == true
+    runs-on: ubuntu-latest
     
-    [Parameter(Mandatory=$false)]
-    [string]$OutputPath = ""
-)
-
-# -------------------- Settings --------------------
-# Validate max concurrent limit
-if ($MaxConcurrent -gt 5) {
-    Write-Host "[ERROR] Maximum concurrent migrations ($MaxConcurrent) exceeds the allowed limit of 5." -ForegroundColor Red
-    Write-Host "[ERROR] Please set MaxConcurrent to 5 or less." -ForegroundColor Red
-    exit 1
-}
-
-if ($MaxConcurrent -lt 1) {
-    Write-Host "[ERROR] MaxConcurrent must be at least 1." -ForegroundColor Red
-    exit 1
-}
-
-# Repository list (from assessment) - now read from CSV
-$timestamp = Get-Date -Format 'yyyyMMdd-HHmmss'
-
-if ([string]::IsNullOrWhiteSpace($OutputPath)) {
-    $outputCsvPath = "repo_migration_output-$timestamp.csv"
-} else {
-    $outputCsvPath = $OutputPath
-}
-
-if (-not (Test-Path -Path $CsvPath)) {
-    Write-Host "[ERROR] CSV file not found at path: $CsvPath" -ForegroundColor Red
-    exit 1
-}
-
-$REOSource = Import-Csv -Path $CsvPath
-if ($REOSource.Count -eq 0) {
-    Write-Host "[ERROR] CSV file is empty: $CsvPath" -ForegroundColor Red
-    exit 1
-}
-
-# Convert to ArrayList for mutation-friendly operations later
-$REPOS = New-Object System.Collections.ArrayList
-foreach ($repo in $REOSource) { [void]$REPOS.Add($repo) }
-
-# Validate required columns
-$requiredColumns = @('org', 'teamproject', 'repo', 'github_org', 'github_repo', 'gh_repo_visibility')
-$firstRepo = $REPOS[0]
-$missingColumns = $requiredColumns | Where-Object { $_ -notin $firstRepo.PSObject.Properties.Name }
-
-if ($missingColumns) {
-    Write-Host "[ERROR] CSV is missing required columns: $($missingColumns -join ', ')" -ForegroundColor Red
-    Write-Host "[ERROR] Required columns: $($requiredColumns -join ', ')" -ForegroundColor Red
-    exit 1
-}
-
-# Ensure expected columns exist / initialize
-foreach ($repo in $REPOS) {
-    if ($repo.PSObject.Properties["Migration_Status"]) {
-        $repo.Migration_Status = "Pending"
-    } else {
-        $repo | Add-Member -NotePropertyName Migration_Status -NotePropertyValue "Pending"
-    }
-
-    if ($repo.PSObject.Properties["Log_File"]) {
-        $repo.Log_File = ""
-    } else {
-        $repo | Add-Member -NotePropertyName Log_File -NotePropertyValue ""
-    }
-}
-
-function Write-MigrationStatusCsv {
-    $REPOS | Export-Csv -Path $outputCsvPath -NoTypeInformation
-}
-
-Write-MigrationStatusCsv
-Write-Host "[INFO] Starting migration with $MaxConcurrent concurrent jobs..."
-Write-Host "[INFO] Processing $($REPOS.Count) repositories from: $CsvPath" -ForegroundColor Cyan
-Write-Host "[INFO] Initialized migration status output: $outputCsvPath" -ForegroundColor Cyan
-
-# -------------------- MAIN: parallel migration with concurrent jobs --------------------
-$queue      = [System.Collections.ArrayList]@($REPOS)
-$inProgress = [System.Collections.ArrayList]@()
-$migrated   = [System.Collections.ArrayList]@()
-$failed     = [System.Collections.ArrayList]@()
-
-$script:StatusLineWidth = 0
-
-function Show-StatusBar {
-    param($queue, $inProgress, $migrated, $failed)
-    $queueCount     = $queue.Count
-    $progressCount  = $inProgress.Count
-    $migratedCount  = $migrated.Count
-    $failedCount    = $failed.Count
-
-    $statusLine  = "QUEUE: $queueCount | "
-    $statusLine += "IN PROGRESS: $progressCount | "
-    $statusLine += "MIGRATED: $migratedCount | "
-    $statusLine += "MIGRATION FAILED: $failedCount"
-
-    if ($statusLine.Length -gt $script:StatusLineWidth) {
-        $script:StatusLineWidth = $statusLine.Length
-    }
-
-    $statusLine = $statusLine.PadRight($script:StatusLineWidth)
-    Write-Host "`r$statusLine" -NoNewline -ForegroundColor Cyan
-}
-
-while ($queue.Count -gt 0 -or $inProgress.Count -gt 0) {
-    # Start new jobs if below max concurrent
-    while ($inProgress.Count -lt $MaxConcurrent -and $queue.Count -gt 0) {
-        $repo = $queue[0]
-        $queue.RemoveAt(0)
-
-        $adoOrg         = $repo.org
-        $adoTeamProject = $repo.teamproject
-        $adoRepo        = $repo.repo
-        $githubOrg      = $repo.github_org
-        $githubRepo     = $repo.github_repo
-        $gh_repo_visibility = $repo.gh_repo_visibility
-
-        # Create log file (per repo)
-        $logFile = "migration-$githubRepo-$(Get-Date -Format 'yyyyMMdd-HHmmss').txt"
-
-        # Ensure log directory exists (if any)
-        $logDir = Split-Path -Path $logFile
-        if ($logDir) { $null = New-Item -ItemType Directory -Force -Path $logDir }
-
-        $repo.Log_File = $logFile
-        Write-MigrationStatusCsv
-
-        # Background job script: emits ONLY @{ MigrationSuccess = <bool> }
-        $scriptBlock = {
-            param($adoOrg, $adoTeamProject, $adoRepo, $githubOrg, $githubRepo, $gh_repo_visibility, $logFile)
-
-            function Migrate-Repository {
-                param ($adoOrg, $adoTeamProject, $adoRepo, $githubOrg, $githubRepo, $gh_repo_visibility, $logFile)
-
-                "[{0}] [START] Migration: {1}/{2} -> {3}/{4} (gh_repo_visibility: {5})" -f (Get-Date), $adoTeamProject, $adoRepo, $githubOrg, $githubRepo, $gh_repo_visibility |
-                    Tee-Object -FilePath $logFile -Append | Out-Null
-
-                "[{0}] [DEBUG] Running: gh ado2gh migrate-repo --ado-org {1} --ado-team-project {2} --ado-repo {3} --github-org {4} --github-repo {5} --target-repo-visibility {6}" -f (Get-Date), $adoOrg, $adoTeamProject, $adoRepo, $githubOrg, $githubRepo, $gh_repo_visibility |
-                    Tee-Object -FilePath $logFile -Append | Out-Null
-
-                & gh ado2gh migrate-repo `
-                    --ado-org $adoOrg `
-                    --ado-team-project $adoTeamProject `
-                    --ado-repo $adoRepo `
-                    --github-org $githubOrg `
-                    --github-repo $githubRepo `
-                    --target-repo-visibility $gh_repo_visibility *>&1 |
-                    Tee-Object -FilePath $logFile -Append | Out-Null
-                $migrateExit = $LASTEXITCODE
-
-                # Check for markers in the log
-                $logContent = Get-Content -Path $logFile -Raw
-
-                if ($logContent -match "No operation will be performed") {
-                    return $false  # keep behavior as Failure; change to $null for "Skipped"
-                }
-                if ($logContent -notmatch "State: SUCCEEDED") {
-                    return $false
-                }
-
-                if ($migrateExit -eq 0) {
-                    "[{0}] [SUCCESS] Migration: {1}/{2} -> {3}/{4}" -f (Get-Date), $adoTeamProject, $adoRepo, $githubOrg, $githubRepo |
-                        Tee-Object -FilePath $logFile -Append | Out-Null
-                    return $true
-                } else {
-                    "[{0}] [FAILED] Migration: {1}/{2} -> {3}/{4}" -f (Get-Date), $adoTeamProject, $adoRepo, $githubOrg, $githubRepo |
-                        Tee-Object -FilePath $logFile -Append | Out-Null
-                    return $false
-                }
-            }
-
-            # Execute migration and return a simple result object
-            $migrationSuccess = Migrate-Repository -adoOrg $adoOrg -adoTeamProject $adoTeamProject -adoRepo $adoRepo -githubOrg $githubOrg -githubRepo $githubRepo -gh_repo_visibility $gh_repo_visibility -logFile $logFile
-            return @{ MigrationSuccess = $migrationSuccess }
-        }
-
-        # Start background job
-        $job = Start-Job -ScriptBlock $scriptBlock -ArgumentList $adoOrg, $adoTeamProject, $adoRepo, $githubOrg, $githubRepo, $gh_repo_visibility, $logFile
-
-        $null = $inProgress.Add([PSCustomObject]@{
-            Job = $job
-            Repo = $repo
-            LogFile = $logFile
-            LastOutputLength = 0   # track how much of the log we've printed
-        })
-
-        Show-StatusBar -queue $queue -inProgress $inProgress -migrated $migrated -failed $failed
-    }
-
-    # --- Stream new output from each job's log file to the console ---
-    foreach ($item in @($inProgress)) {
-        if (Test-Path -Path $item.LogFile) {
-            try {
-                $content = Get-Content -Path $item.LogFile -Raw
-                $newLen = $content.Length
-
-                if ($newLen -gt $item.LastOutputLength) {
-                    $delta = $content.Substring($item.LastOutputLength)
-                    $item.LastOutputLength = $newLen
-
-                    # Print the new portion, then re-render status bar
-                    if ($delta) {
-                        Write-Host ""
-                        # Trim trailing newlines to keep the status bar tidy
-                        $delta.TrimEnd("`r","`n") -split "(`r`n|`n|`r)" | ForEach-Object {
-                            if ($_ -ne '') { Write-Host $_ }
-                        }
-                        Show-StatusBar -queue $queue -inProgress $inProgress -migrated $migrated -failed $failed
-                    }
-                }
-            } catch {
-                # Ignore transient read errors while the job is writing
-            }
-        }
-    }
-
-    # --- Check completed/failed/stopped jobs ---
-    foreach ($item in @($inProgress)) {
-        if ($item.Job.State -in 'Completed','Failed','Stopped') {
-            # Receive only result objects; logs have already been printed from files
-            $jobOutput = Receive-Job -Job $item.Job
-            Remove-Job -Job $item.Job
-
-            # Pick the last object that actually has the MigrationSuccess property
-            $result =
-              $jobOutput |
-              Where-Object { $_ -is [hashtable] -and $_.ContainsKey('MigrationSuccess') } |
-              Select-Object -Last 1
-
-            if ($null -eq $result) {
-                # If the job didn't return the expected result object, treat as failure
-                $null = $failed.Add($item.Repo)
-                $item.Repo.Migration_Status = "Failure"
-            }
-            elseif ($result.MigrationSuccess -eq $true) {
-                $null = $migrated.Add($item.Repo)
-                $item.Repo.Migration_Status = "Success"
-            }
-            else {
-                $null = $failed.Add($item.Repo)
-                $item.Repo.Migration_Status = "Failure"
-            }
-
-            Write-MigrationStatusCsv
-
-            $inProgress.Remove($item)
-            Show-StatusBar -queue $queue -inProgress $inProgress -migrated $migrated -failed $failed
-        }
-    }
-
-    Start-Sleep -Seconds 5
-}
-
-Write-Host "`n[INFO] All migrations completed."
-Write-Host "[SUMMARY] Total: $($REPOS.Count) | Migrated: $($migrated.Count) | Failed: $($failed.Count) " -ForegroundColor Green
-
-Write-MigrationStatusCsv
-Write-Host "[INFO] Wrote migration results with Migration_Status column: $outputCsvPath" -ForegroundColor Cyan
-
-# Exit with error code if there were failures (for GitHub Actions)
-if ($failed.Count -gt 0) {
-    Write-Host "[WARNING] Migration completed with $($failed.Count) failures" -ForegroundColor Yellow
-    # Don't exit with error - let workflow handle it
-}
+    steps:
+      - name: Trigger Validation Workflow
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GH_PAT }}
+          script: |
+            await github.rest.actions.createWorkflowDispatch({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              workflow_id: '2-migration-validation.yml',
+              ref: context.ref,
+              inputs: {
+                csv_path: '${{ inputs.csv_path }}'
+              }
+            });
+            console.log('✅ Migration validation workflow triggered successfully');
