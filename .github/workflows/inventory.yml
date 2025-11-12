@@ -7,15 +7,10 @@ on:
         description: 'Azure DevOps organization (e.g., yashtnaik). Leave blank to scan all orgs ADO_PAT can access.'
         required: false
         type: string
-      minimal:
-        description: 'Use --minimal to speed up inventory (fewer columns)'
-        required: false
-        default: false
-        type: boolean
       artifact_name:
         description: 'Artifact base name'
         required: false
-        default: 'repo-inventory-csv'
+        default: 'repos.csv'
         type: string
 
 permissions:
@@ -30,13 +25,14 @@ jobs:
     environment: PAT tokens
 
     steps:
-      # No checkout: we do not reference any files from the repository
+      # Intentionally no checkout: we do not reference any files from the repository
 
       - name: Verify GitHub CLI
         shell: pwsh
         env:
           GH_TOKEN: ${{ secrets.GH_PAT }}
         run: |
+          $ErrorActionPreference = 'Stop'
           Write-Host "GitHub CLI version:" -ForegroundColor Cyan
           gh --version
           Write-Host "`nAuthentication status:" -ForegroundColor Cyan
@@ -47,6 +43,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GH_PAT }}
         run: |
+          $ErrorActionPreference = 'Stop'
           Write-Host "Installing gh-ado2gh extension..." -ForegroundColor Cyan
           gh extension install github/gh-ado2gh
           Write-Host "`nInstalled extension version:" -ForegroundColor Cyan
@@ -57,7 +54,7 @@ jobs:
         shell: pwsh
         env:
           GH_TOKEN: ${{ secrets.GH_PAT }}
-          ADO_PAT: ${{ secrets.ADO_PAT }}  # required by inventory-report
+          ADO_PAT: ${{ secrets.ADO_PAT }}  # required by inventory-report per tool help
         run: |
           $ErrorActionPreference = 'Stop'
 
@@ -74,27 +71,29 @@ jobs:
 
           Write-Host "[INFO] Executing:" -ForegroundColor Cyan
           Write-Host $cmd
-
-          # Run the inventory command (generates multiple CSVs: orgs.csv, teamprojects.csv, repos.csv, pipelines.csv, ...)
           iex $cmd
 
-          # Find repos.csv anywhere under the working directory
-          $repoCsv = Get-ChildItem -Path . -Recurse -Filter "repos.csv" | Select-Object -First 1
+          # Find the newest repos.csv anywhere under the working directory
+          $repoCsv = Get-ChildItem -Path . -Recurse -Filter "repos.csv" |
+            Sort-Object LastWriteTime -Descending |
+            Select-Object -First 1
+
           if (-not $repoCsv) {
             Write-Error "[ERROR] Could not find repos.csv after inventory-report. Ensure the command completed successfully."
           }
 
           Write-Host "[INFO] Found repos.csv at: $($repoCsv.FullName)" -ForegroundColor Green
 
-          # Copy to a known location for artifact upload
-          Copy-Item -Path $repoCsv.FullName -Destination .\repos.csv -Force
+          # Output absolute path for upload step (no copy to avoid 'overwrite itself' issue)
+          "repo_csv_path=$((Resolve-Path $repoCsv.FullName).Path)" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
 
-          # Output path for next step
-          "repo_csv_path=$((Resolve-Path .\repos.csv).Path)" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
-
-          # Optional: Preview top 5 rows
-          Write-Host "`n=== repos.csv preview (Top 5 rows) ===" -ForegroundColor Cyan
-          Import-Csv .\repos.csv | Select-Object -First 5 | Format-Table -AutoSize
+          # Optional: preview top rows safely
+          try {
+            Write-Host "`n=== repos.csv preview (Top 5 rows) ===" -ForegroundColor Cyan
+            Import-Csv $repoCsv.FullName | Select-Object -First 5 | Format-Table -AutoSize
+          } catch {
+            Write-Host "[WARN] Preview failed (non-CSV or large file). Proceeding with upload." -ForegroundColor Yellow
+          }
 
       - name: Upload repos.csv artifact (only)
         uses: actions/upload-artifact@v4
@@ -108,9 +107,13 @@ jobs:
         if: always()
         shell: pwsh
         run: |
+          $adoOrg   = "${{ inputs.ado_org }}"
+          $minimal  = "${{ inputs.minimal }}"
+          $baseName = "${{ inputs.artifact_name }}-${{ github.run_number }}"
+
           Write-Host "## Inventory Complete" >> $env:GITHUB_STEP_SUMMARY
           Write-Host "" >> $env:GITHUB_STEP_SUMMARY
-          Write-Host "**Command:** gh ado2gh inventory-report ${{ inputs.ado_org && format('--ado-org {0}', inputs.ado_org) || '' }} ${{ inputs.minimal && '--minimal' || '' }}" >> $env:GITHUB_STEP_SUMMARY
-          Write-Host "**Artifact:** `${{ inputs.artifact_name }}-${{ github.run_number }}` (contains only \`repos.csv\`)" >> $env:GITHUB_STEP_SUMMARY
+          Write-Host "**Command:** gh ado2gh inventory-report $($adoOrg -and ('--ado-org ' + $adoOrg) -or '') $($minimal -eq 'true' ? '--minimal' : '')" >> $env:GITHUB_STEP_SUMMARY
+          Write-Host "**Artifact:** \`$baseName\` (contains only \`repos.csv\`)" >> $env:GITHUB_STEP_SUMMARY
           Write-Host "" >> $env:GITHUB_STEP_SUMMARY
-          Write-Host "📥 Download **repos.csv** from Artifacts, modify as needed, and use it for migration/validation workflows." >> $env:GITHUB_STEP_SUMMARY
+          Write-Host "📥 Download **repos.csv** from Artifacts, modify as needed, and use it for your migration/validation workflows." >> $env:GITHUB_STEP_SUMMARY
