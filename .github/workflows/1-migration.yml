@@ -1,4 +1,4 @@
-workflow:name: 1-migration
+name: 1-migration
 
 on:
   workflow_dispatch:
@@ -18,28 +18,28 @@ on:
         description: 'Path to repos CSV file'
         required: false
         default: 'repos.csv'
-      trigger_validation:
-        description: 'Automatically trigger validation after migration'
-        required: false
-        default: false
-        type: boolean
-  workflow_call:
-    inputs:
-      max_concurrent:
-        description: 'Maximum concurrent migrations (1-5)'
-        required: false
-        default: '3'
-        type: string
-      csv_path:
-        description: 'Path to repos CSV file'
-        required: false
-        default: 'repos.csv'
-        type: string
-      trigger_validation:
-        description: 'Automatically trigger validation after migration'
-        required: false
-        default: false
-        type: boolean
+  #     trigger_validation:
+  #       description: 'Automatically trigger validation after migration'
+  #       required: false
+  #       default: false
+  #       type: boolean
+  # workflow_call:
+  #   inputs:
+  #     max_concurrent:
+  #       description: 'Maximum concurrent migrations (1-5)'
+  #       required: false
+  #       default: '3'
+  #       type: string
+  #     csv_path:
+  #       description: 'Path to repos CSV file'
+  #       required: false
+  #       default: 'repos.csv'
+  #       type: string
+  #     trigger_validation:
+  #       description: 'Automatically trigger validation after migration'
+  #       required: false
+  #       default: false
+  #       type: boolean
       
 jobs:
   migrate-repositories:
@@ -143,7 +143,7 @@ jobs:
             
             # Determine positions for repo/github url rendering
             IFS=',' read -r -a hcols <<< "$header"
-            function colpos() {
+            colpos() {
               local name="$1"
               for i in "${!hcols[@]}"; do
                 if [[ "${hcols[$i]}" == "$name" ]]; then
@@ -204,7 +204,7 @@ EOF
               
               if (( success > 10 )); then
                 summary+="\n*... and $((success - 10)) more*\n"
-              }
+              fi
             fi
             
             # Write to GitHub Actions summary
@@ -249,25 +249,25 @@ EOF
             fi
           fi
   
-  trigger-validation:
-    name: Trigger Migration Validation
-    needs: migrate-repositories
-    if: github.event.inputs.trigger_validation == 'true' || inputs.trigger_validation == true
-    runs-on: ubuntu-latest
+  # trigger-validation:
+  #   name: Trigger Migration Validation
+  #   needs: migrate-repositories
+  #   if: github.event.inputs.trigger_validation == 'true' || inputs.trigger_validation == true
+  #   runs-on: ubuntu-latest
     
-    steps:
-      - name: Trigger Validation Workflow
-        uses: actions/github-script@v7
-        with:
-          github-token: ${{ secrets.GH_PAT }}
-          script: |
-            await github.rest.actions.createWorkflowDispatch({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              workflow_id: '2-migration-validation.yml',
-              ref: context.ref,
-              inputs: {
-                csv_path: '${{ inputs.csv_path }}'
-              }
-            });
-            console.log('✅ Migration validation workflow triggered successfully');
+  #   steps:
+  #     - name: Trigger Validation Workflow
+  #       uses: actions/github-script@v7
+  #       with:
+  #         github-token: ${{ secrets.GH_PAT }}
+  #         script: |
+  #           await github.rest.actions.createWorkflowDispatch({
+  #             owner: context.repo.owner,
+  #             repo: context.repo.repo,
+  #             workflow_id: '2-migration-validation.yml',
+  #             ref: context.ref,
+  #             inputs: {
+  #               csv_path: '${{ inputs.csv_path }}'
+  #             }
+  #           });
+  #           console.log('✅ Migration validation workflow triggered successfully');
