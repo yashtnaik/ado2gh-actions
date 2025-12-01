@@ -5,35 +5,35 @@ on:
     inputs:
       csv_path:
         description: 'Path to CSV file with repository list'
-        required: false
+        required: true
         default: 'repos.csv'
         type: string
-      trigger_mannequins:
-        description: 'Automatically trigger mannequin validation after migration validation'
-        required: false
-        default: false
-        type: boolean
-      github_org:
-        description: 'GitHub organization name (required if triggering mannequins)'
-        required: false
-        type: string
+      # trigger_mannequins:
+      #   description: 'Automatically trigger mannequin validation after migration validation'
+      #   required: false
+      #   default: false
+      #   type: boolean
+      # github_org:
+      #   description: 'GitHub organization name (required if triggering mannequins)'
+      #   required: false
+      #   type: string
 
-  workflow_call:
-    inputs:
-      csv_path:
-        description: 'Path to CSV file with repository list'
-        required: false
-        default: 'repos.csv'
-        type: string
-      trigger_mannequins:
-        description: 'Automatically trigger mannequin validation after migration validation'
-        required: false
-        default: false
-        type: boolean
-      github_org:
-        description: 'GitHub organization name (required if triggering mannequins)'
-        required: false
-        type: string
+  # workflow_call:
+  #   inputs:
+  #     csv_path:
+  #       description: 'Path to CSV file with repository list'
+  #       required: false
+  #       default: 'repos.csv'
+  #       type: string
+  #     trigger_mannequins:
+  #       description: 'Automatically trigger mannequin validation after migration validation'
+  #       required: false
+  #       default: false
+  #       type: boolean
+  #     github_org:
+  #       description: 'GitHub organization name (required if triggering mannequins)'
+  #       required: false
+  #       type: string
 
 permissions:
   contents: read
@@ -44,7 +44,7 @@ jobs:
     name: Validate Migrated Repositories
     runs-on: windows-latest
     timeout-minutes: 120  # 2 hours for validation
-    environment: PAT tokens  # Requires approval before running
+    # environment: PAT tokens  # Requires approval before running
 
     steps:
       - name: Checkout Repository
@@ -142,32 +142,32 @@ jobs:
           }
         shell: pwsh
   
-  trigger-mannequins-validation:
-    name: Trigger Mannequins Validation
-    needs: validate-migrations
-    if: github.event.inputs.trigger_mannequins == 'true' || inputs.trigger_mannequins == true
-    runs-on: ubuntu-latest
+  # trigger-mannequins-validation:
+  #   name: Trigger Mannequins Validation
+  #   needs: validate-migrations
+  #   if: github.event.inputs.trigger_mannequins == 'true' || inputs.trigger_mannequins == true
+  #   runs-on: ubuntu-latest
     
-    steps:
-      - name: Trigger Mannequins Validation Workflow
-        uses: actions/github-script@v7
-        with:
-          github-token: ${{ secrets.GH_PAT }}
-          script: |
-            const githubOrg = '${{ inputs.github_org }}';
-            if (!githubOrg) {
-              core.setFailed('github_org is required when trigger_mannequins is true');
-              return;
-            }
+  #   steps:
+  #     - name: Trigger Mannequins Validation Workflow
+  #       uses: actions/github-script@v7
+  #       with:
+  #         github-token: ${{ secrets.GH_PAT }}
+  #         script: |
+  #           const githubOrg = '${{ inputs.github_org }}';
+  #           if (!githubOrg) {
+  #             core.setFailed('github_org is required when trigger_mannequins is true');
+  #             return;
+  #           }
             
-            await github.rest.actions.createWorkflowDispatch({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              workflow_id: '3-mannequins-validation.yml',
-              ref: context.ref,
-              inputs: {
-                github_org: githubOrg,
-                output_file: 'mannequins.csv'
-              }
-            });
-            console.log('✅ Mannequins validation workflow triggered successfully');
+  #           await github.rest.actions.createWorkflowDispatch({
+  #             owner: context.repo.owner,
+  #             repo: context.repo.repo,
+  #             workflow_id: '3-mannequins-validation.yml',
+  #             ref: context.ref,
+  #             inputs: {
+  #               github_org: githubOrg,
+  #               output_file: 'mannequins.csv'
+  #             }
+  #           });
+  #           console.log('✅ Mannequins validation workflow triggered successfully');
