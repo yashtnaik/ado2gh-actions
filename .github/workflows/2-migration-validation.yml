@@ -118,37 +118,38 @@ jobs:
             validation-*.json
           retention-days: 30
 
-      - name: Generate Workflow Summary
-        if: always()
-        run: |
-          Write-Host "## Migration Validation Summary" >> $env:GITHUB_STEP_SUMMARY
-          Write-Host "" >> $env:GITHUB_STEP_SUMMARY
-          Write-Host "**Run Number:** ${{ github.run_number }}" >> $env:GITHUB_STEP_SUMMARY       
-          Write-Host "**CSV Path:** ${{ inputs.csv_path }}" >> $env:GITHUB_STEP_SUMMARY
-          Write-Host "" >> $env:GITHUB_STEP_SUMMARY
+      # - name: Generate Workflow Summary
+      #   if: always()
+      #   run: |
+      #     Write-Host "## Migration Validation Summary" >> $env:GITHUB_STEP_SUMMARY
+      #     Write-Host "" >> $env:GITHUB_STEP_SUMMARY
+      #     Write-Host "**Run Number:** ${{ github.run_number }}" >> $env:GITHUB_STEP_SUMMARY       
+      #     Write-Host "**CSV Path:** ${{ inputs.csv_path }}" >> $env:GITHUB_STEP_SUMMARY
+      #     Write-Host "" >> $env:GITHUB_STEP_SUMMARY
 
-          # Check for validation log
-          $logFile = Get-ChildItem -Filter "validation-log-*.txt" | Sort-Object LastWriteTime -Descending | Select-Object -First 1
-          if ($logFile) {
-            Write-Host "### Validation Log Preview" >> $env:GITHUB_STEP_SUMMARY
-            Write-Host "" >> $env:GITHUB_STEP_SUMMARY
-            Write-Host '```' >> $env:GITHUB_STEP_SUMMARY
-            Get-Content $logFile.FullName -Tail 50 | ForEach-Object {
-              $_ >> $env:GITHUB_STEP_SUMMARY
-            }
-            Write-Host '```' >> $env:GITHUB_STEP_SUMMARY
-            Write-Host "" >> $env:GITHUB_STEP_SUMMARY
-            Write-Host "📊 Full validation results available in workflow artifacts" >> $env:GITHUB_STEP_SUMMARY
-          }
-        shell: pwsh
+      #     # Check for validation log
+      #     $logFile = Get-ChildItem -Filter "validation-log-*.txt" | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+      #     if ($logFile) {
+      #       Write-Host "### Validation Log Preview" >> $env:GITHUB_STEP_SUMMARY
+      #       Write-Host "" >> $env:GITHUB_STEP_SUMMARY
+      #       Write-Host '```' >> $env:GITHUB_STEP_SUMMARY
+      #       Get-Content $logFile.FullName -Tail 50 | ForEach-Object {
+      #         $_ >> $env:GITHUB_STEP_SUMMARY
+      #       }
+      #       Write-Host '```' >> $env:GITHUB_STEP_SUMMARY
+      #       Write-Host "" >> $env:GITHUB_STEP_SUMMARY
+      #       Write-Host "📊 Full validation results available in workflow artifacts" >> $env:GITHUB_STEP_SUMMARY
+      #     }
+      #   shell: pwsh
 
       
+
       - name: Generate Table Summary (tick marks only, robust)
-        shell: powershell
+        shell: pwsh
         run: |
           $summaryPath = $env:GITHUB_STEP_SUMMARY
       
-          # Find the latest validation log file (in case date format drifted)
+          # Find latest validation log
           $logCandidates = Get-ChildItem -File -Filter "validation-log-*.txt" | Sort-Object LastWriteTime -Descending
           if (@($logCandidates).Count -eq 0) {
             Write-Warning "No validation-log-*.txt found. Skipping summary table."
@@ -157,23 +158,15 @@ jobs:
           $logFile = $logCandidates[0].FullName
           Write-Host "Using log file: $logFile"
       
-          # Read with UTF-8 to preserve ✅/❌ in the summary
+          # Read UTF-8 to preserve emojis
           $lines = Get-Content -LiteralPath $logFile -Encoding UTF8
       
-          # Helper: finalize a repo block into a table row object
           function Finalize-Row {
             param([hashtable]$row)
-      
             $commitStatus = if ($row.AnyCommitMismatch) { '❌ Not Matching' } else { '✅ Matching' }
             $shaStatus    = if ($row.AnyShaMismatch)    { '❌ Not Matching' } else { '✅ Matching' }
-      
-            $overall = if (
-              ($row.BranchCount -eq '✅ Matching') -and
-              ($commitStatus     -eq '✅ Matching') -and
-              ($shaStatus        -eq '✅ Matching')
-            ) { '✅' } else { '❌' }
-      
-            return [pscustomobject]@{
+            $overall      = if (($row.BranchCount -eq '✅ Matching') -and ($commitStatus -eq '✅ Matching') -and ($shaStatus -eq '✅ Matching')) { '✅' } else { '❌' }
+            [pscustomobject]@{
               Repository   = $row.Repo
               BranchCount  = $row.BranchCount
               CommitCount  = $commitStatus
@@ -182,19 +175,15 @@ jobs:
             }
           }
       
-          # Parse the log using a simple state machine
+          # Parse the log
           $repoSummaries = New-Object System.Collections.Generic.List[object]
           $current = $null
       
           foreach ($line in $lines) {
-            # Start of repo block: "[...] Validating migration: <repo>"
             if ($line -match '^\[.+\]\s+Validating migration:\s+(?<repo>.+)$') {
-              if ($null -ne $current) {
-                $repoSummaries.Add( (Finalize-Row -row $current) )
-              }
-              $repoName = $matches['repo'].Trim()
+              if ($null -ne $current) { $repoSummaries.Add( (Finalize-Row -row $current) ) }
               $current = @{
-                Repo              = $repoName
+                Repo              = $matches['repo'].Trim()
                 BranchCount       = ''
                 AnyCommitMismatch = $false
                 AnyShaMismatch    = $false
@@ -204,82 +193,47 @@ jobs:
       
             if ($null -eq $current) { continue }
       
-            # Branch count line: "... Branch Count: ADO=... | GitHub=... | ✅ Matching"
             if ($line -match '^\[.+\]\s+Branch Count:.*\|\s+(?<status>✅ Matching|❌ Not Matching)$') {
-              $current.BranchCount = $matches['status']
-              continue
+              $current.BranchCount = $matches['status']; continue
             }
       
-            # Per-branch commit count line: "... Branch 'x': ADO Commits=... | GitHub Commits=... | ✅/❌ Matching"
             if ($line -match "^\[.+\]\s+Branch '.+?': .*Commits=.*\|\s*GitHub Commits=.*\|\s*(?<status>✅ Matching|❌ Not Matching)$") {
               if ($matches['status'] -eq '❌ Not Matching') { $current.AnyCommitMismatch = $true }
               continue
             }
       
-            # Per-branch latest SHA line: "... Branch 'x': ADO SHA=... | GitHub SHA=... | ✅/❌ Matching"
             if ($line -match "^\[.+\]\s+Branch '.+?': .*SHA=.*\|\s*GitHub SHA=.*\|\s*(?<status>✅ Matching|❌ Not Matching)$") {
               if ($matches['status'] -eq '❌ Not Matching') { $current.AnyShaMismatch = $true }
               continue
             }
       
-            # End of repo block: "[...] Validation complete for <repo>"
             if ($line -match '^\[.+\]\s+Validation complete for\s+(?<repo>.+)$') {
-              $repoSummaries.Add( (Finalize-Row -row $current) )
-              $current = $null
-              continue
+              $repoSummaries.Add( (Finalize-Row -row $current) ); $current = $null; continue
             }
           }
       
-          # Finalize last repo if file ended mid-block
-          if ($null -ne $current) {
-            $repoSummaries.Add( (Finalize-Row -row $current) )
-          }
+          if ($null -ne $current) { $repoSummaries.Add( (Finalize-Row -row $current) ) }
       
-          # Write Markdown table to the job summary
-          Add-Content -Path $summaryPath -Value "## Validate Migrated Repositories — Status Table"
-          Add-Content -Path $summaryPath -Value ""
-          Add-Content -Path $summaryPath -Value "`| Repository `| Branch Count `| Commit Count `| Latest SHA `| Overall `|"
-          Add-Content -Path $summaryPath -Value "|---|---|---|---|---|"
+          # Helper to write UTF-8 lines safely
+          function Write-Line([string]$text) { $text | Out-File -FilePath $summaryPath -Append -Encoding utf8 }
+      
+          # Build header/separator using char codes (avoids raw '|' parsing)
+          $pipe = [char]124
+          $header = "{0} Repository {0} Branch Count {0} Commit Count {0} Latest SHA {0} Overall {0}" -f $pipe
+          $separator = [string]::Join('', @("$pipe","---$pipe","---$pipe","---$pipe","---$pipe","---$pipe"))
+      
+          Write-Line "## Validate Migrated Repositories — Status Table"
+          Write-Line ""
+          Write-Line $header
+          Write-Line $separator
       
           foreach ($row in $repoSummaries) {
-            $lineMd = "| $($row.Repository) | $($row.BranchCount) | $($row.CommitCount) | $($row.LatestSHA) | $($row.Overall) |"
-            Add-Content -Path $summaryPath -Value $lineMd
+            $lineMd = "{0} {1} {0} {2} {0} {3} {0} {4} {0} {5} {0}" -f $pipe, $row.Repository, $row.BranchCount, $row.CommitCount, $row.LatestSHA, $row.Overall
+            Write-Line $lineMd
           }
       
-          # Totals
           $total = @($repoSummaries).Count
           $ok    = @( $repoSummaries | Where-Object { $_.Overall -eq '✅' } ).Count
-          $bad   = @( $repoSummaries | Where-Object { $_    $bad   = @( $repoSummaries | Where-Object { $_.Overall -eq '❌' } ).Count
+          $bad   = @( $repoSummaries | Where-Object { $_.Overall -eq '❌' } ).Count
       
-          Add-Content -Path $summaryPath -Value ""
-      
-        
-        # trigger-mannequins-validation:
-        #   name: Trigger Mannequins Validation
-        #   needs: validate-migrations
-        #   if: github.event.inputs.trigger_mannequins == 'true' || inputs.trigger_mannequins == true
-        #   runs-on: ubuntu-latest
-          
-        #   steps:
-        #     - name: Trigger Mannequins Validation Workflow
-        #       uses: actions/github-script@v7
-        #       with:
-        #         github-token: ${{ secrets.GH_PAT }}
-        #         script: |
-        #           const githubOrg = '${{ inputs.github_org }}';
-        #           if (!githubOrg) {
-        #             core.setFailed('github_org is required when trigger_mannequins is true');
-        #             return;
-        #           }
-                  
-        #           await github.rest.actions.createWorkflowDispatch({
-        #             owner: context.repo.owner,
-        #             repo: context.repo.repo,
-        #             workflow_id: '3-mannequins-validation.yml',
-        #             ref: context.ref,
-        #             inputs: {
-        #               github_org: githubOrg,
-        #               output_file: 'mannequins.csv'
-        #             }
-        #           });
-        #           console.log('✅ Mannequins validation workflow triggered successfully');
+          Write    Write-Line ""
