@@ -1,6 +1,6 @@
 org,teamproject,repo,url,last-push-date,pipeline-count,compressed-repo-size-in-bytes,most-active-contributor,pr-count,commits-past-year,github_org,github_repo,gh_repo_visibility
-yashtnaik,MigrationDemo,ADO-Migration-repo,https://dev.azure.com/yashtnaik/MigrationDemo/_git/ADO-Migration-repo,06-10-2025,0,2954799,Yash Naik (yashtnaik@outlook.com),0,3,test-19-yash,ADO-Migration-repo,private
-yashtnaik,MigrationDemo,calotracker,https://dev.azure.com/yashtnaik/MigrationDemo/_git/calotracker,25-10-2025,0,3118669,Yash Naik (yashtnaik@outlook.com),0,323,test-19-yash,calotracker,public
-yashtnaik,MigrationDemo,GHA_Demo,https://dev.azure.com/yashtnaik/MigrationDemo/_git/GHA_Demo,25-10-2025,0,4871,Yash Naik (yashtnaik@outlook.com),0,9,test-19-yash,GHA_Demo,internal
-yashtnaik,MigrationDemo,lab8,https://dev.azure.com/yashtnaik/MigrationDemo/_git/lab8,25-10-2025,0,9347,Yash Naik (yashtnaik@outlook.com),0,4,test-19-yash,lab8,private
-yashtnaik,MigrationDemo,Mern-ado2gh,https://dev.azure.com/yashtnaik/MigrationDemo/_git/Mern-ado2gh,26-09-2025,0,208558,Yash Naik (yashtnaik@outlook.com),3,8,test-19-yash,Mern-ado2gh,public
+yashtnaik,MigrationDemo,ADO-Migration-repo,https://dev.azure.com/yashtnaik/MigrationDemo/_git/ADO-Migration-repo,06-10-2025,0,2954799,Yash Naik (yashtnaik@outlook.com),0,3,Yash-Migration,ADO-Migration-repo,private
+yashtnaik,MigrationDemo,calotracker,https://dev.azure.com/yashtnaik/MigrationDemo/_git/calotracker,25-10-2025,0,3118669,Yash Naik (yashtnaik@outlook.com),0,323,Yash-Migration,calotracker,public
+yashtnaik,MigrationDemo,GHA_Demo,https://dev.azure.com/yashtnaik/MigrationDemo/_git/GHA_Demo,25-10-2025,0,4871,Yash Naik (yashtnaik@outlook.com),0,9,Yash-Migration,GHA_Demo,internal
+yashtnaik,MigrationDemo,lab8,https://dev.azure.com/yashtnaik/MigrationDemo/_git/lab8,25-10-2025,0,9347,Yash Naik (yashtnaik@outlook.com),0,4,Yash-Migration,lab8,private
+yashtnaik,MigrationDemo,Mern-ado2gh,https://dev.azure.com/yashtnaik/MigrationDemo/_git/Mern-ado2gh,26-09-2025,0,208558,Yash Naik (yashtnaik@outlook.com),3,8,Yash-Migration,Mern-ado2gh,public
