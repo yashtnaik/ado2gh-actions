@@ -1,213 +1,143 @@
 
-#requires -Version 7.0
-<#
-.SYNOPSIS
-  ADO → GitHub post-migration validation
+# Load required assembly for URL encoding
+Add-Type -AssemblyName System.Web
 
-.DESCRIPTION
-  Validates migrated repositories by reading rows from a CSV and performing checks
-  (existence in the target GitHub org via gh CLI). Script is dynamic: values come
-  from environment variables but can be overridden via parameters. If GhOrg is not
-  provided, it is derived from the CSV's first row `github_org` (fallback `GH_ORG`).
+$LOG_FILE = "validation-log-$(Get-Date -Format 'yyyyMMdd').txt"
 
-.PARAMETER CsvPath
-  Path to CSV (defaults to $env:CSV_PATH)
+function Validate-Migration {
+    param (
+        [string]$adoOrg,
+        [string]$adoTeamProject,
+        [string]$adoRepo,
+        [string]$githubOrg,
+        [string]$githubRepo
+    )
 
-.PARAMETER GhOrg
-  GitHub organization (defaults to $env:GH_ORG, otherwise derived from CSV)
+    Write-Output "[$(Get-Date)] Validating migration: $githubRepo" | Tee-Object -FilePath $LOG_FILE -Append
 
-.EXPECTED CSV COLUMNS
-  org, teamproject, repo, url, last-push-date, pipeline-count,
-  compressed-repo-size-in-bytes, most-active-contributor, pr-count,
-  commits-past-year, github_org, github_repo, gh_repo_visibility
+    # GitHub repo info
+    gh repo view "$githubOrg/$githubRepo" --json createdAt,diskUsage,defaultBranchRef,isPrivate |
+        Out-File -FilePath "validation-$githubRepo.json"
 
-.OUTPUTS
-  - validation-log-<timestamp>.txt
-  - validation-results-<timestamp>.json
-  - validation_summary.csv
+    # Get GitHub branches (handle pagination)
+    $ghBranches = gh api "/repos/$githubOrg/$githubRepo/branches" --paginate | ConvertFrom-Json
+    $ghBranchNames = $ghBranches | ForEach-Object { $_.name }
 
-.NOTES
-  Only comments and #requires may appear above the param(...) block.
-#>
+    # Set up ADO auth
+    $base64AuthInfo = [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes(":$env:ADO_PAT"))
+    $headers = @{ Authorization = "Basic $base64AuthInfo" }
 
-param(
-  [Parameter(Mandatory = $false)]
-  [string] $CsvPath = $env:CSV_PATH,
+    # Get ADO branches
+    $adoBranchUrl = "https://dev.azure.com/$adoOrg/$adoTeamProject/_apis/git/repositories/$adoRepo/refs?filter=heads/&api-version=7.1"
+    $adoBranchResponse = Invoke-RestMethod -Uri $adoBranchUrl -Headers $headers -Method Get
+    $adoBranches = $adoBranchResponse.value
+    $adoBranchNames = $adoBranches | ForEach-Object { $_.name -replace '^refs/heads/', '' }
 
-  [Parameter(Mandatory = $false)]
-  [string] $GhOrg = $env:GH_ORG
-)
+    # Compare branch counts
+    $ghBranchCount = $ghBranchNames.Count
+    $adoBranchCount = $adoBranchNames.Count
+    $branchCountStatus = if ($ghBranchCount -eq $adoBranchCount) { "✅ Matching" } else { "❌ Not Matching" }
 
-# ---- Executable statements start after param ----
-Set-StrictMode -Version Latest
-$ErrorActionPreference = 'Stop'
+    Write-Output "[$(Get-Date)] Branch Count: ADO=$adoBranchCount | GitHub=$ghBranchCount | $branchCountStatus" | Tee-Object -FilePath $LOG_FILE -Append
 
-# Timestamp for artifacts
-$stamp    = Get-Date -Format 'yyyyMMdd-HHmmss'
-$logPath  = "validation-log-$stamp.txt"
-$jsonPath = "validation-results-$stamp.json"
+    # Compare branch names
+    $missingInGH = $adoBranchNames | Where-Object { $_ -notin $ghBranchNames }
+    $missingInADO = $ghBranchNames | Where-Object { $_ -notin $adoBranchNames }
 
-function Write-Log {
-  param([string]$Message)
-  Write-Host $Message
-  Add-Content -LiteralPath $logPath -Value $Message
-}
-
-# Validate CSV path
-if (-not $CsvPath) {
-  throw "CSV path is missing. Set env CSV_PATH or pass -CsvPath."
-}
-if (-not (Test-Path -LiteralPath $CsvPath)) {
-  throw "CSV path '$CsvPath' does not exist. Check the path or ensure the file is checked out."
-}
-
-# Read the CSV and ensure it's always treated as an array
-try {
-  $rows = @(Import-Csv -LiteralPath $CsvPath)
-} catch {
-  throw "Failed to read CSV '$CsvPath'. $_"
-}
-
-if (@($rows).Count -eq 0) {
-  throw "CSV '$CsvPath' has no data rows."
-}
-
-# Derive GhOrg from CSV if missing
-if (-not $GhOrg) {
-  $first = $rows | Select-Object -First 1
-  $GhOrg = $first.github_org
-  if (-not $GhOrg) { $GhOrg = $first.GH_ORG } # fallback if column named GH_ORG
-  if (-not $GhOrg) {
-    throw "GH org is missing. Provide -GhOrg, set env GH_ORG, or include 'github_org' in the CSV."
-  }
-}
-
-Write-Host "Validation in progress... please wait ..."
-
-# Check GH CLI availability
-$ghAvailable = $false
-try {
-  $null = & gh --version
-  $ghAvailable = $true
-} catch {
-  $ghAvailable = $false
-}
-
-# If GH_PAT is set, feed it to gh via GH_TOKEN and authenticate if needed
-if ($env:GH_PAT) {
-  $env:GH_TOKEN = $env:GH_PAT
-  if ($ghAvailable) {
-    try {
-      gh auth status
-    } catch {
-      Write-Host "Authenticating gh with GH_TOKEN..."
-      Write-Output $env:GH_TOKEN | gh auth login --with-token
-      # Optional: avoid org prompts
-      gh config set git_protocol https
+    if ($missingInGH.Count -gt 0) {
+        Write-Output "[$(Get-Date)] Branches missing in GitHub: $($missingInGH -join ', ')" | Tee-Object -FilePath $LOG_FILE -Append
     }
-  }
-}
-
-# Prepare results as a List to always have Count
-$results = New-Object System.Collections.Generic.List[object]
-
-# Iterate rows and perform checks
-foreach ($r in $rows) {
-  $org                   = $r.org
-  $teamProject           = $r.teamproject
-  $repo                  = $r.repo
-  $sourceUrl             = $r.url
-  $lastPushDate          = $r.'last-push-date'
-  $pipelineCount         = $r.'pipeline-count'
-  $compressedSizeBytes   = $r.'compressed-repo-size-in-bytes'
-  $mostActiveContributor = $r.'most-active-contributor'
-  $prCount               = $r.'pr-count'
-  $commitsPastYear       = $r.'commits-past-year'
-  $rowGhOrg              = $r.github_org
-  $rowGhRepo             = $r.github_repo
-  $ghRepoVisibility      = $r.gh_repo_visibility
-
-  # Prefer per-row org from CSV; fallback to derived/global GhOrg
-  $targetOrg      = if ($rowGhOrg) { $rowGhOrg } else { $GhOrg }
-  $targetRepoName = if ($rowGhRepo) { $rowGhRepo } else { $repo }
-  $fullGhRepo     = if ($targetOrg -and $targetRepoName) { "$targetOrg/$targetRepoName" } else { $null }
-
-  $existsInGh = 'Unknown'
-  $notes = @()
-
-  if ($null -eq $fullGhRepo) {
-    $existsInGh = 'Skipped'
-    $notes += "Missing target org/repo name."
-  }
-  elseif ($ghAvailable) {
-    try {
-      $null = & gh repo view $fullGhRepo --json name --jq '.name'
-      $existsInGh = 'Yes'
-    } catch {
-      $existsInGh = 'No'
-      $notes += "Repo not found in GH org."
+    if ($missingInADO.Count -gt 0) {
+        Write-Output "[$(Get-Date)] Branches missing in ADO: $($missingInADO -join ', ')" | Tee-Object -FilePath $LOG_FILE -Append
     }
-  } else {
-    $existsInGh = 'Unknown'
-    $notes += "gh CLI unavailable on runner; existence check skipped."
-  }
 
-  $results.Add([pscustomobject]@{
-    source_org                 = $org
-    source_teamproject         = $teamProject
-    source_repo                = $repo
-    source_url                 = $sourceUrl
-    last_push_date             = $lastPushDate
-    pipeline_count             = $pipelineCount
-    compressed_repo_size_bytes = $compressedSizeBytes
-    most_active_contributor    = $mostActiveContributor
-    pr_count                   = $prCount
-    commits_past_year          = $commitsPastYear
-    github_org                 = $targetOrg
-    github_repo                = $targetRepoName
-    gh_repo_visibility         = $ghRepoVisibility
-    gh_full_name               = $fullGhRepo
-    exists_in_github           = $existsInGh
-    notes                      = ($notes -join '; ')
-  })
+    # Validate commit counts and latest commit IDs
+    foreach ($branchName in ($ghBranchNames | Where-Object { $_ -in $adoBranchNames })) {
+        # GitHub commit count and latest SHA
+        $ghCommitCount = 0
+        $ghLatestSha = ""
+        $page = 1
+        $perPage = 100
+
+        do {
+            $encodedGhBranchName = [System.Web.HttpUtility]::UrlEncode($branchName)
+            $ghCommits = gh api "/repos/$githubOrg/$githubRepo/commits?sha=$encodedGhBranchName&page=$page&per_page=$perPage" | ConvertFrom-Json
+            if ($page -eq 1 -and $ghCommits.Count -gt 0) {
+                $ghLatestSha = $ghCommits[0].sha
+            }
+            $ghCommitCount += $ghCommits.Count
+            $page++
+        } while ($ghCommits.Count -eq $perPage)
+
+        # ADO commit count and latest SHA
+        $adoCommitCount = 0
+        $adoLatestSha = ""
+        $skip = 0
+        $batchSize = 1000
+
+        do {
+            $encodedBranchName = [System.Web.HttpUtility]::UrlEncode($branchName)
+            $adoUrl = "https://dev.azure.com/$adoOrg/$adoTeamProject/_apis/git/repositories/$adoRepo/commits?`$top=$batchSize&`$skip=$skip&searchCriteria.itemVersion.version=$encodedBranchName&searchCriteria.itemVersion.versionType=branch&api-version=7.1"
+            $adoResponse = Invoke-RestMethod -Uri $adoUrl -Headers $headers -Method Get
+            $adoBatch = $adoResponse.value
+            if ($skip -eq 0 -and $adoBatch.Count -gt 0) {
+                $adoLatestSha = $adoBatch[0].commitId
+            }
+            $adoCommitCount += $adoBatch.Count
+            $skip += $batchSize
+        } while ($adoBatch.Count -eq $batchSize)
+
+        # Match status
+        $countMatch = ($ghCommitCount -eq $adoCommitCount)
+        $shaMatch = ($ghLatestSha -eq $adoLatestSha)
+
+        $commitCountStatus = if ($countMatch) { "✅ Matching" } else { "❌ Not Matching" }
+        $shaStatus = if ($shaMatch) { "✅ Matching" } else { "❌ Not Matching" }
+
+        # Log results
+        Write-Output "[$(Get-Date)] Branch '$branchName': ADO Commits=$adoCommitCount | GitHub Commits=$ghCommitCount | $commitCountStatus" | Tee-Object -FilePath $LOG_FILE -Append
+        Write-Output "[$(Get-Date)] Branch '$branchName': ADO SHA=$adoLatestSha | GitHub SHA=$ghLatestSha | $shaStatus" | Tee-Object -FilePath $LOG_FILE -Append
+    }
+
+
+    Write-Output "[$(Get-Date)] Validation complete for $githubRepo" | Tee-Object -FilePath $LOG_FILE -Append
 }
 
-# Robust counts (wrap pipelines in array to avoid 'Count' on single object)
-$total   = @($results).Count
-$yesCnt  = @( $results | Where-Object { $_.exists_in_github -eq 'Yes' } ).Count
-$noCnt   = @( $results | Where-Object { $_.exists_in_github -eq 'No' } ).Count
-$skipCnt = @( $results | Where-Object { $_.exists_in_github -eq 'Skipped' } ).Count
-$unkCnt  = @( $results | Where-Object { $_.exists_in_github -eq 'Unknown' } ).Count
+function Validate-FromCSV {
+    param (
+        [string]$csvPath = "repos.csv"
+    )
 
-Write-Log "======================"
-Write-Log "Validation Summary"
-Write-Log "======================"
-Write-Log "Total rows: $total"
-Write-Log "Exists in GitHub: $yesCnt"
-Write-Log "Missing in GitHub: $noCnt"
-Write-Log "Skipped: $skipCnt"
-Write-Log "Unknown: $unkCnt"
-Write-Log ""
+    if (-not (Test-Path $csvPath)) {
+        Write-Output "[$(Get-Date)] ERROR: CSV file not found: $csvPath" | Tee-Object -FilePath $LOG_FILE -Append
+        return
+    }
 
-# Save artifacts
-try {
-  $results | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $jsonPath -Encoding UTF8
-  Write-Log "Saved JSON: $jsonPath"
-} catch {
-  Write-Log "Failed to write JSON results: $_"
+    $repos = Import-Csv -Path $csvPath
+
+    foreach ($repo in $repos) {
+        Write-Output "[$(Get-Date)] Processing: $($repo.repo) -> $($repo.github_repo)" | Tee-Object -FilePath $LOG_FILE -Append
+        
+        Validate-Migration -adoOrg $repo.org `
+                          -adoTeamProject $repo.teamproject `
+                          -adoRepo $repo.repo `
+                          -githubOrg $repo.github_org `
+                          -githubRepo $repo.github_repo
+    }
+
+    Write-Output "[$(Get-Date)] All validations from CSV completed" | Tee-Object -FilePath $LOG_FILE -Append
 }
 
-# Console table
-$results | Select-Object github_org, github_repo, exists_in_github, notes | Format-Table -AutoSize | Out-Host
 
-# CSV summary
-$summaryCsvPath = "validation_summary.csv"
-try {
-  $results | Export-Csv -LiteralPath $summaryCsvPath -NoTypeInformation
-  Write-Log "Saved CSV summary: $summaryCsvPath"
-} catch {
-  Write-Log "Failed to write CSV summary: $_"
-}
+# Single repository validation (commented out)
+#$ADO_ORG = "contosodevopstest"
+#$ADO_PROJECT = "StarReads"
+#$ADO_REPO = "StarReads"
+#$GITHUB_ORG = "ADO2GH-Migration"
+#$GH_REPO = "StarReads"
 
-# Non-fatal: keep job success even if some repos missing
-## Uncomment to fail when missing repos exist:
+# Single repository mode (commented out)
+#Validate-Migration -adoOrg $ADO_ORG -adoTeamProject $ADO_PROJECT -adoRepo $ADO_REPO -githubOrg $GITHUB_ORG -githubRepo $GH_REPO
+
+# CSV validation mode - validate all migrated repositories
+Validate-FromCSV -csvPath "repos.csv"
