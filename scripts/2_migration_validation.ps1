@@ -3,9 +3,33 @@
 Add-Type -AssemblyName System.Web
 
 # Script parameters
+
+#requires -Version 7.0
+<#
+.SYNOPSIS
+  ADO → GH post-migration validation
+#>
+
 param(
-    [string]$CsvPath = "repos.csv"
+  [Parameter(Mandatory = $false)]
+  [string] $CsvPath = $env:CSV_PATH,
+
+  [Parameter(Mandatory = $false)]
+  [string] $GhOrg = $env:GH_ORG
 )
+
+$ErrorActionPreference = 'Stop'
+
+if (-not $CsvPath -or -not (Test-Path -LiteralPath $CsvPath)) {
+  throw "CSV path is missing or invalid. Passed: '$CsvPath'. Set env CSV_PATH or pass -CsvPath."
+}
+
+if (-not $GhOrg) {
+  throw "GH org is missing. Set env GH_ORG or pass -GhOrg."
+}
+
+Write-Host "Validation in progress... please wait ..."
+# ... rest of your existing validation logic ...
 
 $LOG_FILE = "validation-log-$(Get-Date -Format 'yyyyMMdd').txt"
 
