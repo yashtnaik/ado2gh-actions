@@ -9,10 +9,10 @@ on:
         required: true
         default: 'repos.csv'
         type: string
-      gh_org:
-        description: 'GitHub organization name'
-        required: true
-        type: string
+      # gh_org:
+      #   description: 'GitHub organization name'
+      #   required: true
+      #   type: string
       # trigger_mannequins:
       #   description: 'Automatically trigger mannequin validation after migration validation'
       #   required: false
