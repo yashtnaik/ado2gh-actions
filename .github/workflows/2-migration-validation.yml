@@ -1,4 +1,3 @@
-
 name: 2-migration-validation
 
 on:
@@ -6,8 +5,34 @@ on:
     inputs:
       csv_path:
         description: 'Path to CSV file with repository list'
-        required: true
-        default: ''
+        required: false
+        default: 'repos.csv'
+        type: string
+      trigger_mannequins:
+        description: 'Automatically trigger mannequin validation after migration validation'
+        required: false
+        default: false
+        type: boolean
+      github_org:
+        description: 'GitHub organization name (required if triggering mannequins)'
+        required: false
+        type: string
+
+  workflow_call:
+    inputs:
+      csv_path:
+        description: 'Path to CSV file with repository list'
+        required: false
+        default: 'repos.csv'
+        type: string
+      trigger_mannequins:
+        description: 'Automatically trigger mannequin validation after migration validation'
+        required: false
+        default: false
+        type: boolean
+      github_org:
+        description: 'GitHub organization name (required if triggering mannequins)'
+        required: false
         type: string
 
 permissions:
@@ -18,178 +43,131 @@ jobs:
   validate-migrations:
     name: Validate Migrated Repositories
     runs-on: windows-latest
-    timeout-minutes: 120
+    timeout-minutes: 120  # 2 hours for validation
+    environment: PAT tokens  # Requires approval before running
 
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      # Use Windows PowerShell (5.1) so System.Web works for HttpUtility.UrlEncode
-      - name: Setup Git & GH CLI
-        shell: powershell
-        env:
-          GH_TOKEN: ${{ secrets.GH_PAT }}
+      - name: Setup GitHub CLI
         run: |
+          # Verify gh CLI is available (pre-installed on GitHub runners)
           gh --version
 
-          try {
-            gh auth status
-          } catch {
-            Write-Host "Authenticating gh with GH_TOKEN..."
-            $token = $env:GH_TOKEN
-            $token | gh auth login --with-token
-            gh config set git_protocol https
-          }
-
+          # Configure git
           git config --global user.name "GitHub Actions"
           git config --global user.email "actions@github.com"
+        shell: pwsh
 
-      - name: Prepare CSV for script (ensure it is repos.csv at repo root)
-        shell: powershell
+      - name: Install gh ado2gh extension
         run: |
-          $inputPath = "${{ inputs.csv_path }}"
-          if (-not (Test-Path -LiteralPath $inputPath)) {
-            Write-Error "CSV file not found at input path: $inputPath"
+          Write-Host "Installing gh ado2gh extension..."
+          gh extension install github/gh-ado2gh
+
+          Write-Host "Verifying installation..."
+          gh ado2gh version
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT }}
+
+      - name: Validate CSV File
+        run: |
+          $csvPath = "${{ inputs.csv_path }}"
+
+          if (-not (Test-Path $csvPath)) {
+            Write-Error "CSV file not found: $csvPath"
             exit 1
           }
 
-          if ($inputPath -ne "repos.csv") {
-            Copy-Item -LiteralPath $inputPath -Destination "repos.csv" -Force
-            Write-Host "Copied $inputPath -> repos.csv for the script"
-          } else {
-            Write-Host "Using repos.csv as-is for the script"
+          Write-Host "CSV file found: $csvPath"
+
+          # Validate CSV structure
+          $csv = Import-Csv -Path $csvPath
+          $requiredColumns = @('org', 'teamproject', 'repo', 'github_org', 'github_repo')
+
+          $csvColumns = $csv[0].PSObject.Properties.Name
+          $missingColumns = $requiredColumns | Where-Object { $_ -notin $csvColumns }
+
+          if ($missingColumns.Count -gt 0) {
+            Write-Error "Missing required columns in CSV: $($missingColumns -join ', ')"
+            exit 1
           }
 
-      - name: Run Migration Validation (PowerShell 5.1)
-        shell: powershell
+          Write-Host "✅ CSV validation passed"
+          Write-Host "Total repositories to validate: $($csv.Count)"
+        shell: pwsh
+
+      - name: Run Migration Validation
         env:
-          GH_PAT:  ${{ secrets.GH_PAT }}
+          GH_PAT: ${{ secrets.GH_PAT }}
           ADO_PAT: ${{ secrets.ADO_PAT }}
-          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+          GH_TOKEN: ${{ secrets.GH_PAT }}
         run: |
-          Write-Host "Validation in progress... please wait ..."
-          # Path to your working script. Adjust if needed.
-          .\scripts\2_migration_validation.ps1
-          # If your script is at repo root, use:
-          # .\2_migration_validation.ps1
+          # Execute validation script with parameters
+          .\scripts\2_migration_validation.ps1 -CsvPath "${{ inputs.csv_path }}"
+        shell: pwsh
 
-      # Build a clean table-only summary with ✅/❌ by parsing the log your script wrote
-      
-      - name: Generate Table Summary (tick marks only, robust)
-        shell: powershell
-        run: |
-          $summaryPath = $env:GITHUB_STEP_SUMMARY
-      
-          # Find the latest validation log file (in case date format drifted)
-          $logCandidates = Get-ChildItem -File -Filter "validation-log-*.txt" | Sort-Object LastWriteTime -Descending
-          if (@($logCandidates).Count -eq 0) {
-            Write-Warning "No validation-log-*.txt found. Skipping summary table."
-            exit 0
-          }
-          $logFile = $logCandidates[0].FullName
-          Write-Host "Using log file: $logFile"
-      
-          # Read with UTF-8 to preserve ✅/❌ in the summary
-          $lines = Get-Content -LiteralPath $logFile -Encoding UTF8
-      
-          # Helper: finalize a repo block into a table row object
-          function Finalize-Row {
-            param([hashtable]$row)
-      
-            $commitStatus = if ($row.AnyCommitMismatch) { '❌ Not Matching' } else { '✅ Matching' }
-            $shaStatus    = if ($row.AnyShaMismatch)    { '❌ Not Matching' } else { '✅ Matching' }
-      
-            $overall = if (
-              ($row.BranchCount -eq '✅ Matching') -and
-              ($commitStatus     -eq '✅ Matching') -and
-              ($shaStatus        -eq '✅ Matching')
-            ) { '✅' } else { '❌' }
-      
-            return [pscustomobject]@{
-              Repository   = $row.Repo
-              BranchCount  = $row.BranchCount
-              CommitCount  = $commitStatus
-              LatestSHA    = $shaStatus
-              Overall      = $overall
-            }
-          }
-      
-          # Parse the log using a simple state machine
-          $repoSummaries = New-Object System.Collections.Generic.List[object]
-          $current = $null
-      
-          foreach ($line in $lines) {
-            # Start of repo block: "[...] Validating migration: <repo>"
-            if ($line -match '^\[.+\]\s+Validating migration:\s+(?<repo>.+)$') {
-              if ($null -ne $current) {
-                $repoSummaries.Add( (Finalize-Row -row $current) )
-              }
-              $repoName = $matches['repo'].Trim()
-              $current = @{
-                Repo              = $repoName
-                BranchCount       = ''
-                AnyCommitMismatch = $false
-                AnyShaMismatch    = $false
-              }
-              continue
-            }
-      
-            if ($null -eq $current) { continue }
-      
-            # Branch count line: "... Branch Count: ADO=... | GitHub=... | ✅ Matching"
-            if ($line -match '^\[.+\]\s+Branch Count:.*\|\s+(?<status>✅ Matching|❌ Not Matching)$') {
-              $current.BranchCount = $matches['status']
-              continue
-            }
-      
-            # Per-branch commit count line: "... Branch 'x': ADO Commits=... | GitHub Commits=... | ✅/❌ Matching"
-            if ($line -match "^\[.+\]\s+Branch '.+?': .*Commits=.*\|\s*GitHub Commits=.*\|\s*(?<status>✅ Matching|❌ Not Matching)$") {
-              if ($matches['status'] -eq '❌ Not Matching') { $current.AnyCommitMismatch = $true }
-              continue
-            }
-      
-            # Per-branch latest SHA line: "... Branch 'x': ADO SHA=... | GitHub SHA=... | ✅/❌ Matching"
-            if ($line -match "^\[.+\]\s+Branch '.+?': .*SHA=.*\|\s*GitHub SHA=.*\|\s*(?<status>✅ Matching|❌ Not Matching)$") {
-              if ($matches['status'] -eq '❌ Not Matching') { $current.AnyShaMismatch = $true }
-              continue
-            }
-      
-            # End of repo block: "[...] Validation complete for <repo>"
-            if ($line -match '^\[.+\]\s+Validation complete for\s+(?<repo>.+)$') {
-              $repoSummaries.Add( (Finalize-Row -row $current) )
-              $current = $null
-              continue
-            }
-          }
-      
-          # Finalize last repo if file ended mid-block
-          if ($null -ne $current) {
-            $repoSummaries.Add( (Finalize-Row -row $current) )
-          }
-      
-          # Write Markdown table to the job summary
-          Add-Content -Path $summaryPath -Value "## Validate Migrated Repositories — Status Table"
-          Add-Content -Path $summaryPath -Value ""
-          Add-Content -Path $summaryPath -Value "| Repository | Branch Count | Commit Count | Latest SHA | Overall |"
-          Add-Content -Path $summaryPath -Value "|---|---|---|---|---|"
-      
-          foreach ($row in $repoSummaries) {
-            $lineMd = "| $($row.Repository) | $($row.BranchCount) | $($row.CommitCount) | $($row.LatestSHA) | $($row.Overall) |"
-            Add-Content -Path $summaryPath -Value $lineMd
-          }
-      
-          # Totals
-          $total = @($repoSummaries).Count
-          $ok    = @( $repoSummaries | Where-Object { $_.Overall -eq '✅' } ).Count
-          $bad   = @( $repoSummaries | Where-Object { $_    $bad   = @( $repoSummaries | Where-Object { $_.Overall -eq '❌' } ).Count
-      
-          Add-Content -Path $summaryPath -Value ""
-      - name: Upload Validation Artifacts
+      - name: Upload Validation Results
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: validation-results-${{ github.run_number }}
           path: |
-            validation-log-*.txt
+            validation-*.txt
             validation-*.json
-            validation_summary.csv
+          retention-days: 30
+
+      - name: Generate Workflow Summary
+        if: always()
+        run: |
+          Write-Host "## Migration Validation Summary" >> $env:GITHUB_STEP_SUMMARY
+          Write-Host "" >> $env:GITHUB_STEP_SUMMARY
+          Write-Host "**Run Number:** ${{ github.run_number }}" >> $env:GITHUB_STEP_SUMMARY       
+          Write-Host "**CSV Path:** ${{ inputs.csv_path }}" >> $env:GITHUB_STEP_SUMMARY
+          Write-Host "" >> $env:GITHUB_STEP_SUMMARY
+
+          # Check for validation log
+          $logFile = Get-ChildItem -Filter "validation-log-*.txt" | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+          if ($logFile) {
+            Write-Host "### Validation Log Preview" >> $env:GITHUB_STEP_SUMMARY
+            Write-Host "" >> $env:GITHUB_STEP_SUMMARY
+            Write-Host '```' >> $env:GITHUB_STEP_SUMMARY
+            Get-Content $logFile.FullName -Tail 50 | ForEach-Object {
+              $_ >> $env:GITHUB_STEP_SUMMARY
+            }
+            Write-Host '```' >> $env:GITHUB_STEP_SUMMARY
+            Write-Host "" >> $env:GITHUB_STEP_SUMMARY
+            Write-Host "📊 Full validation results available in workflow artifacts" >> $env:GITHUB_STEP_SUMMARY
+          }
+        shell: pwsh
+  
+  trigger-mannequins-validation:
+    name: Trigger Mannequins Validation
+    needs: validate-migrations
+    if: github.event.inputs.trigger_mannequins == 'true' || inputs.trigger_mannequins == true
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Trigger Mannequins Validation Workflow
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GH_PAT }}
+          script: |
+            const githubOrg = '${{ inputs.github_org }}';
+            if (!githubOrg) {
+              core.setFailed('github_org is required when trigger_mannequins is true');
+              return;
+            }
+            
+            await github.rest.actions.createWorkflowDispatch({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              workflow_id: '3-mannequins-validation.yml',
+              ref: context.ref,
+              inputs: {
+                github_org: githubOrg,
+                output_file: 'mannequins.csv'
+              }
+            });
+            console.log('✅ Mannequins validation workflow triggered successfully');
