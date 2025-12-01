@@ -1,4 +1,3 @@
-
 name: 2-migration-validation
 
 on:
@@ -6,8 +5,34 @@ on:
     inputs:
       csv_path:
         description: 'Path to CSV file with repository list'
-        required: true
+        required: false
         default: 'repos.csv'
+        type: string
+      trigger_mannequins:
+        description: 'Automatically trigger mannequin validation after migration validation'
+        required: false
+        default: false
+        type: boolean
+      github_org:
+        description: 'GitHub organization name (required if triggering mannequins)'
+        required: false
+        type: string
+
+  workflow_call:
+    inputs:
+      csv_path:
+        description: 'Path to CSV file with repository list'
+        required: false
+        default: 'repos.csv'
+        type: string
+      trigger_mannequins:
+        description: 'Automatically trigger mannequin validation after migration validation'
+        required: false
+        default: false
+        type: boolean
+      github_org:
+        description: 'GitHub organization name (required if triggering mannequins)'
+        required: false
         type: string
 
 permissions:
@@ -18,84 +43,70 @@ jobs:
   validate-migrations:
     name: Validate Migrated Repositories
     runs-on: windows-latest
-    timeout-minutes: 120
-    environment: PAT tokens  # keep if your org requires approval
+    timeout-minutes: 120  # 2 hours for validation
+    environment: PAT tokens  # Requires approval before running
 
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      # Use Windows PowerShell (5.1) so System.Web works for HttpUtility.UrlEncode
-      - name: Setup Git & GH CLI
-        shell: powershell
-        env:
-          GH_TOKEN: ${{ secrets.GH_PAT }}
+      - name: Setup GitHub CLI
         run: |
+          # Verify gh CLI is available (pre-installed on GitHub runners)
           gh --version
 
-          try {
-            gh auth status
-          } catch {
-            Write-Host "Authenticating gh with GH_TOKEN..."
-            # PowerShell-native stdin feed (no bash '<<' or '||')
-            $token = $env:GH_TOKEN
-            $token | gh auth login --with-token
-            gh config set git_protocol https
-          }
-
+          # Configure git
           git config --global user.name "GitHub Actions"
           git config --global user.email "actions@github.com"
+        shell: pwsh
 
-      - name: Validate CSV File exists & columns
-        shell: powershell
+      - name: Install gh ado2gh extension
+        run: |
+          Write-Host "Installing gh ado2gh extension..."
+          gh extension install github/gh-ado2gh
+
+          Write-Host "Verifying installation..."
+          gh ado2gh version
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT }}
+
+      - name: Validate CSV File
         run: |
           $csvPath = "${{ inputs.csv_path }}"
 
-          if (-not (Test-Path -LiteralPath $csvPath)) {
+          if (-not (Test-Path $csvPath)) {
             Write-Error "CSV file not found: $csvPath"
             exit 1
           }
 
           Write-Host "CSV file found: $csvPath"
 
-          $csv = @(Import-Csv -LiteralPath $csvPath)
-          if ($csv.Count -eq 0) {
-            Write-Error "CSV has no data rows: $csvPath"
-            exit 1
-          }
+          # Validate CSV structure
+          $csv = Import-Csv -Path $csvPath
+          $requiredColumns = @('org', 'teamproject', 'repo', 'github_org', 'github_repo')
 
-          $requiredColumns = @(
-            'org','teamproject','repo','url',
-            'last-push-date','pipeline-count','compressed-repo-size-in-bytes',
-            'most-active-contributor','pr-count','commits-past-year',
-            'github_org','github_repo','gh_repo_visibility'
-          )
+          $csvColumns = $csv[0].PSObject.Properties.Name
+          $missingColumns = $requiredColumns | Where-Object { $_ -notin $csvColumns }
 
-          $firstRow = $csv | Select-Object -First 1
-          $csvColumns = $firstRow.PSObject.Properties.Name
-          $missing = $requiredColumns | Where-Object { $_ -notin $csvColumns }
-
-          if (@($missing).Count -gt 0) {
-            Write-Error "Missing required columns in CSV: $(@($missing) -join ', ')"
+          if ($missingColumns.Count -gt 0) {
+            Write-Error "Missing required columns in CSV: $($missingColumns -join ', ')"
             exit 1
           }
 
           Write-Host "✅ CSV validation passed"
-          Write-Host "Total repositories to validate: $(@($csv).Count)"
+          Write-Host "Total repositories to validate: $($csv.Count)"
+        shell: pwsh
 
-      - name: Run Migration Validation (PowerShell 5.1)
-        shell: powershell
+      - name: Run Migration Validation
         env:
-          # Make tokens available as env vars used by your script
-          GH_PAT:  ${{ secrets.GH_PAT }}
+          GH_PAT: ${{ secrets.GH_PAT }}
           ADO_PAT: ${{ secrets.ADO_PAT }}
+          GH_TOKEN: ${{ secrets.GH_PAT }}
         run: |
-          # Your script expects repos.csv at repo root (or pass the input path explicitly)
-          Write-Host "Validation in progress... please wait ..."
-          # If your file is saved at scripts/2_migration_validation.ps1, call that path:
-          .\scripts\2_migration_validation.ps1
-          # If you keep the script at the repo root, use:
-          # .\2_migration_validation.ps1
+          # Execute validation script with parameters
+          .\scripts\2_migration_validation.ps1 -CsvPath "${{ inputs.csv_path }}"
+        shell: pwsh
 
       - name: Upload Validation Results
         if: always()
@@ -103,28 +114,60 @@ jobs:
         with:
           name: validation-results-${{ github.run_number }}
           path: |
-            validation-log-*.txt
+            validation-*.txt
             validation-*.json
-            validation_summary.csv
           retention-days: 30
 
       - name: Generate Workflow Summary
         if: always()
-        shell: powershell
         run: |
-          $summary = $env:GITHUB_STEP_SUMMARY
-          Add-Content -Path $summary -Value "## Migration Validation Summary"
-          Add-Content -Path $summary -Value ""
-          Add-Content -Path $summary -Value "**Run Number:** ${{ github.run_number }}"
-          Add          Add-Content -Path $summary -Value "**CSV Path:** ${{ inputs.csv_path }}"
-          Add-Content -Path $summary -Value ""
+          Write-Host "## Migration Validation Summary" >> $env:GITHUB_STEP_SUMMARY
+          Write-Host "" >> $env:GITHUB_STEP_SUMMARY
+          Write-Host "**Run Number:** ${{ github.run_number }}" >> $env:GITHUB_STEP_SUMMARY       
+          Write-Host "**CSV Path:** ${{ inputs.csv_path }}" >> $env:GITHUB_STEP_SUMMARY
+          Write-Host "" >> $env:GITHUB_STEP_SUMMARY
 
+          # Check for validation log
           $logFile = Get-ChildItem -Filter "validation-log-*.txt" | Sort-Object LastWriteTime -Descending | Select-Object -First 1
           if ($logFile) {
-            Add-Content -Path $summary -Value "### Validation Log Preview"
-            Add-Content -Path $summary -Value ""
-            Add-Content -Path $summary -Value '```'
-            Get-Content $logFile.FullName -Tail 50 | ForEach-Object { Add-Content -Path $summary -Value $_ }
-            Add-Content -Path $summary -Value '```'
-            Add-Content -Path $summary -Value ""
-            Add-Content -Path $summary -Value "📊 Full validation results available in workflow artifacts"
+            Write-Host "### Validation Log Preview" >> $env:GITHUB_STEP_SUMMARY
+            Write-Host "" >> $env:GITHUB_STEP_SUMMARY
+            Write-Host '```' >> $env:GITHUB_STEP_SUMMARY
+            Get-Content $logFile.FullName -Tail 50 | ForEach-Object {
+              $_ >> $env:GITHUB_STEP_SUMMARY
+            }
+            Write-Host '```' >> $env:GITHUB_STEP_SUMMARY
+            Write-Host "" >> $env:GITHUB_STEP_SUMMARY
+            Write-Host "📊 Full validation results available in workflow artifacts" >> $env:GITHUB_STEP_SUMMARY
+          }
+        shell: pwsh
+  
+  trigger-mannequins-validation:
+    name: Trigger Mannequins Validation
+    needs: validate-migrations
+    if: github.event.inputs.trigger_mannequins == 'true' || inputs.trigger_mannequins == true
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Trigger Mannequins Validation Workflow
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GH_PAT }}
+          script: |
+            const githubOrg = '${{ inputs.github_org }}';
+            if (!githubOrg) {
+              core.setFailed('github_org is required when trigger_mannequins is true');
+              return;
+            }
+            
+            await github.rest.actions.createWorkflowDispatch({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              workflow_id: '3-mannequins-validation.yml',
+              ref: context.ref,
+              inputs: {
+                github_org: githubOrg,
+                output_file: 'mannequins.csv'
+              }
+            });
+            console.log('✅ Mannequins validation workflow triggered successfully');
