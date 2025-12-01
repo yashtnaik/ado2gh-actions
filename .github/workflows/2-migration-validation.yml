@@ -105,9 +105,9 @@ jobs:
           GH_TOKEN: ${{ secrets.GH_PAT }}
         run: |
           # Execute validation script with parameters
-          $csvPath = "${{ inputs.csv_path }}"
+          $CSV_PATH = "${{ inputs.csv_path }}"
           Write-Host "Validation in progress... please wait ..."
-          .\scripts\2_migration_validation.ps1 -CsvPath "$env:csvPath" -GhOrg "$env:GH_ORG"
+          .\scripts\2_migration_validation.ps1 -CsvPath "$env:CSV_PATH" -GhOrg "$env:GH_ORG"
         shell: pwsh
 
       - name: Upload Validation Results
