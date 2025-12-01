@@ -1,3 +1,4 @@
+
 name: 2-migration-validation
 
 on:
@@ -118,32 +119,7 @@ jobs:
             validation-*.json
           retention-days: 30
 
-      # - name: Generate Workflow Summary
-      #   if: always()
-      #   run: |
-      #     Write-Host "## Migration Validation Summary" >> $env:GITHUB_STEP_SUMMARY
-      #     Write-Host "" >> $env:GITHUB_STEP_SUMMARY
-      #     Write-Host "**Run Number:** ${{ github.run_number }}" >> $env:GITHUB_STEP_SUMMARY       
-      #     Write-Host "**CSV Path:** ${{ inputs.csv_path }}" >> $env:GITHUB_STEP_SUMMARY
-      #     Write-Host "" >> $env:GITHUB_STEP_SUMMARY
-
-      #     # Check for validation log
-      #     $logFile = Get-ChildItem -Filter "validation-log-*.txt" | Sort-Object LastWriteTime -Descending | Select-Object -First 1
-      #     if ($logFile) {
-      #       Write-Host "### Validation Log Preview" >> $env:GITHUB_STEP_SUMMARY
-      #       Write-Host "" >> $env:GITHUB_STEP_SUMMARY
-      #       Write-Host '```' >> $env:GITHUB_STEP_SUMMARY
-      #       Get-Content $logFile.FullName -Tail 50 | ForEach-Object {
-      #         $_ >> $env:GITHUB_STEP_SUMMARY
-      #       }
-      #       Write-Host '```' >> $env:GITHUB_STEP_SUMMARY
-      #       Write-Host "" >> $env:GITHUB_STEP_SUMMARY
-      #       Write-Host "📊 Full validation results available in workflow artifacts" >> $env:GITHUB_STEP_SUMMARY
-      #     }
-      #   shell: pwsh
-
-      
-
+      # Table-only summary with ✅/❌, minimal fix applied to totals
       - name: Generate Table Summary (tick marks only, robust)
         shell: pwsh
         run: |
@@ -232,8 +208,10 @@ jobs:
             Write-Line $lineMd
           }
       
-          $total = @($repoSummaries).Count
-          $ok    = @( $repoSummaries | Where-Object { $_.Overall -eq '✅' } ).Count
-          $bad   = @( $repoSummaries | Where-Object { $_.Overall -eq '❌' } ).Count
+          # ✅ Minimal fix: use List[T].Count and materialize arrays for pipeline counts
+          $total = $repoSummaries.Count
+          $ok    = ( $repoSummaries | Where-Object { $_.Overall -eq '✅' } | ForEach-Object { $_ } ).Count
+          $bad   = ( $repoSummaries | Where-Object { $_.Overall -eq '❌' } | ForEach-Object { $_ } ).Count
       
-          Write    Write-Line ""
+          Write-Line ""
+          Write-Line ("**Totals:** {0} ✅ / {1} ❌ (out of {2} repos)" -f $ok, $bad, $total)
