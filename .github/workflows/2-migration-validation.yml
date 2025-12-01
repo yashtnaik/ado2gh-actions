@@ -65,6 +65,7 @@ jobs:
         env:
           GH_PAT:  ${{ secrets.GH_PAT }}
           ADO_PAT: ${{ secrets.ADO_PAT }}
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
         run: |
           Write-Host "Validation in progress... please wait ..."
           # Path to your working script. Adjust if needed.
