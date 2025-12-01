@@ -44,7 +44,7 @@ jobs:
     name: Validate Migrated Repositories
     runs-on: windows-latest
     timeout-minutes: 120  # 2 hours for validation
-    # environment: PAT tokens  # Requires approval before running
+    environment: PAT tokens  # Requires approval before running
 
     steps:
       - name: Checkout Repository
