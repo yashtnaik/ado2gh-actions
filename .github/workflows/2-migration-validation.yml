@@ -1,3 +1,4 @@
+
 name: 2-migration-validation
 
 on:
@@ -7,6 +8,10 @@ on:
         description: 'Path to CSV file with repository list'
         required: true
         default: 'repos.csv'
+        type: string
+      gh_org:
+        description: 'GitHub organization name'
+        required: true
         type: string
       # trigger_mannequins:
       #   description: 'Automatically trigger mannequin validation after migration validation'
@@ -18,23 +23,6 @@ on:
       #   required: false
       #   type: string
 
-  # workflow_call:
-  #   inputs:
-  #     csv_path:
-  #       description: 'Path to CSV file with repository list'
-  #       required: false
-  #       default: 'repos.csv'
-  #       type: string
-  #     trigger_mannequins:
-  #       description: 'Automatically trigger mannequin validation after migration validation'
-  #       required: false
-  #       default: false
-  #       type: boolean
-  #     github_org:
-  #       description: 'GitHub organization name (required if triggering mannequins)'
-  #       required: false
-  #       type: string
-
 permissions:
   contents: read
   actions: write
@@ -43,39 +31,36 @@ jobs:
   validate-migrations:
     name: Validate Migrated Repositories
     runs-on: windows-latest
-    timeout-minutes: 120  # 2 hours for validation
-    environment: PAT tokens  # Requires approval before running
+    timeout-minutes: 120
+    environment: PAT tokens
 
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
       - name: Setup GitHub CLI
+        shell: pwsh
         run: |
-          # Verify gh CLI is available (pre-installed on GitHub runners)
           gh --version
-
-          # Configure git
           git config --global user.name "GitHub Actions"
           git config --global user.email "actions@github.com"
-        shell: pwsh
 
       - name: Install gh ado2gh extension
-        run: |
-          Write-Host "Installing gh ado2gh extension..."
-          gh extension install github/gh-ado2gh
-
-          Write-Host "Verifying installation..."
-          gh ado2gh version
         shell: pwsh
         env:
           GH_TOKEN: ${{ secrets.GH_PAT }}
+        run: |
+          Write-Host "Installing gh ado2gh extension..."
+          gh extension install github/gh-ado2gh
+          Write-Host "Verifying installation..."
+          gh ado2gh version
 
       - name: Validate CSV File
+        shell: pwsh
         run: |
           $csvPath = "${{ inputs.csv_path }}"
 
-          if (-not (Test-Path $csvPath)) {
+          if (-not (Test-Path -LiteralPath $csvPath)) {
             Write-Error "CSV file not found: $csvPath"
             exit 1
           }
@@ -83,7 +68,7 @@ jobs:
           Write-Host "CSV file found: $csvPath"
 
           # Validate CSV structure
-          $csv = Import-Csv -Path $csvPath
+          $csv = Import-Csv -LiteralPath $csvPath
           $requiredColumns = @('org', 'teamproject', 'repo', 'github_org', 'github_repo')
 
           $csvColumns = $csv[0].PSObject.Properties.Name
@@ -96,19 +81,22 @@ jobs:
 
           Write-Host "✅ CSV validation passed"
           Write-Host "Total repositories to validate: $($csv.Count)"
-        shell: pwsh
 
+      # -------- FIXED: provide env vars and also pass explicit parameters --------
       - name: Run Migration Validation
-        env:
-          GH_PAT: ${{ secrets.GH_PAT }}
-          ADO_PAT: ${{ secrets.ADO_PAT }}
-          GH_TOKEN: ${{ secrets.GH_PAT }}
-        run: |
-          # Execute validation script with parameters
-          $CSV_PATH = "${{ inputs.csv_path }}"
-          Write-Host "Validation in progress... please wait ..."
-          .\scripts\2_migration_validation.ps1 -CsvPath "$env:CSV_PATH" -GhOrg "$env:GH_ORG"
         shell: pwsh
+        env:
+          GH_PAT:   ${{ secrets.GH_PAT }}
+          ADO_PAT:  ${{ secrets.ADO_PAT }}
+          GH_TOKEN: ${{ secrets.GH_PAT }}
+          CSV_PATH: ${{ inputs.csv_path }}    # FIX: make $env:CSV_PATH available
+          GH_ORG:   ${{ inputs.gh_org }}      # FIX: make $env:GH_ORG available
+        run: |
+          Write-Host "Validation in progress... please wait ..."
+          # Pass parameters explicitly (so we don't depend solely on env defaults)
+          .\scripts\2_migration_validation.ps1 `
+            -CsvPath "${{ inputs.csv_path }}" `
+            -GhOrg   "${{ inputs.gh_org }}"
 
       - name: Upload Validation Results
         if: always()
@@ -122,54 +110,21 @@ jobs:
 
       - name: Generate Workflow Summary
         if: always()
+        shell: pwsh
         run: |
           Write-Host "## Migration Validation Summary" >> $env:GITHUB_STEP_SUMMARY
           Write-Host "" >> $env:GITHUB_STEP_SUMMARY
-          Write-Host "**Run Number:** ${{ github.run_number }}" >> $env:GITHUB_STEP_SUMMARY       
+          Write-Host "**Run Number:** ${{ github.run_number }}" >> $env:GITHUB_STEP_SUMMARY
           Write-Host "**CSV Path:** ${{ inputs.csv_path }}" >> $env:GITHUB_STEP_SUMMARY
           Write-Host "" >> $env:GITHUB_STEP_SUMMARY
 
-          # Check for validation log
           $logFile = Get-ChildItem -Filter "validation-log-*.txt" | Sort-Object LastWriteTime -Descending | Select-Object -First 1
           if ($logFile) {
             Write-Host "### Validation Log Preview" >> $env:GITHUB_STEP_SUMMARY
             Write-Host "" >> $env:GITHUB_STEP_SUMMARY
             Write-Host '```' >> $env:GITHUB_STEP_SUMMARY
-            Get-Content $logFile.FullName -Tail 50 | ForEach-Object {
-              $_ >> $env:GITHUB_STEP_SUMMARY
-            }
+            Get-Content $logFile.FullName -Tail 50 | ForEach-Object { $_ >> $env:GITHUB_STEP_SUMMARY }
             Write-Host '```' >> $env:GITHUB_STEP_SUMMARY
             Write-Host "" >> $env:GITHUB_STEP_SUMMARY
             Write-Host "📊 Full validation results available in workflow artifacts" >> $env:GITHUB_STEP_SUMMARY
-          }
-        shell: pwsh
-  
-  # trigger-mannequins-validation:
-  #   name: Trigger Mannequins Validation
-  #   needs: validate-migrations
-  #   if: github.event.inputs.trigger_mannequins == 'true' || inputs.trigger_mannequins == true
-  #   runs-on: ubuntu-latest
-    
-  #   steps:
-  #     - name: Trigger Mannequins Validation Workflow
-  #       uses: actions/github-script@v7
-  #       with:
-  #         github-token: ${{ secrets.GH_PAT }}
-  #         script: |
-  #           const githubOrg = '${{ inputs.github_org }}';
-  #           if (!githubOrg) {
-  #             core.setFailed('github_org is required when trigger_mannequins is true');
-  #             return;
-  #           }
-            
-  #           await github.rest.actions.createWorkflowDispatch({
-  #             owner: context.repo.owner,
-  #             repo: context.repo.repo,
-  #             workflow_id: '3-mannequins-validation.yml',
-  #             ref: context.ref,
-  #             inputs: {
-  #               github_org: githubOrg,
-  #               output_file: 'mannequins.csv'
-  #             }
-  #           });
-  #           console.log('✅ Mannequins validation workflow triggered successfully');
+         
