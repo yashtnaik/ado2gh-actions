@@ -24,7 +24,7 @@
 .OUTPUTS
   - validation-log-<timestamp>.txt
   - validation-results-<timestamp>.json
-  - validation_summary.csv (optional, convenient table)
+  - validation_summary.csv (optional)
 
 .NOTES
   Only comments and #requires may appear above the param(...) block.
@@ -43,11 +43,10 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 # Timestamp for artifacts
-$stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
-$logPath  = "validation-log-$stamp.txt"
+$stamp   = Get-Date -Format 'yyyyMMdd-HHmmss'
+$logPath = "validation-log-$stamp.txt"
 $jsonPath = "validation-results-$stamp.json"
 
-# Helper to log both to console and file
 function Write-Log {
   param([string]$Message)
   Write-Host $Message
@@ -94,36 +93,44 @@ try {
   $ghAvailable = $false
 }
 
-# If GH_PAT is set, set GH_TOKEN for gh CLI
+# If GH_PAT is set, feed it to gh via GH_TOKEN
 if ($env:GH_PAT) {
   $env:GH_TOKEN = $env:GH_PAT
+  if ($ghAvailable) {
+    try {
+      gh auth status
+    } catch {
+      Write-Host "Authenticating gh with GH_TOKEN..."
+      Write-Output $env:GH_TOKEN | gh auth login --with-token
+    }
+  }
 }
 
 $results = New-Object System.Collections.Generic.List[object]
 
 # Iterate rows and perform checks
 foreach ($r in $rows) {
-  $org                          = $r.org
-  $teamProject                  = $r.teamproject
-  $repo                         = $r.repo
-  $sourceUrl                    = $r.url
-  $lastPushDate                 = $r.'last-push-date'
-  $pipelineCount                = $r.'pipeline-count'
-  $compressedSizeBytes          = $r.'compressed-repo-size-in-bytes'
-  $mostActiveContributor        = $r.'most-active-contributor'
-  $prCount                      = $r.'pr-count'
-  $commitsPastYear              = $r.'commits-past-year'
-  $rowGhOrg                     = $r.github_org
-  $rowGhRepo                    = $r.github_repo
-  $ghRepoVisibility             = $r.gh_repo_visibility
+  $org                   = $r.org
+  $teamProject           = $r.teamproject
+  $repo                  = $r.repo
+  $sourceUrl             = $r.url
+  $lastPushDate          = $r.'last-push-date'
+  $pipelineCount         = $r.'pipeline-count'
+  $compressedSizeBytes   = $r.'compressed-repo-size-in-bytes'
+  $mostActiveContributor = $r.'most-active-contributor'
+  $prCount               = $r.'pr-count'
+  $commitsPastYear       = $r.'commits-past-year'
+  $rowGhOrg              = $r.github_org
+  $rowGhRepo             = $r.github_repo
+  $ghRepoVisibility      = $r.gh_repo_visibility
 
   # Prefer per-row org from CSV; fallback to derived/global GhOrg
-  $targetOrg = if ($rowGhOrg) { $rowGhOrg } else { $GhOrg }
+  $targetOrg      = if ($rowGhOrg) { $rowGhOrg } else { $GhOrg }
   $targetRepoName = if ($rowGhRepo) { $rowGhRepo } else { $repo }
-  $fullGhRepo = if ($targetOrg -and $targetRepoName) { "$targetOrg/$targetRepoName" } else { $null }
+  $fullGhRepo     = if ($targetOrg -and $targetRepoName) { "$targetOrg/$targetRepoName" } else { $null }
 
-  $existsInGh   = 'Unknown'
-  $notes        = @()
+  $existsInGh = 'Unknown'
+  $notes = @()
 
   if ($null -eq $fullGhRepo) {
     $existsInGh = 'Skipped'
@@ -131,7 +138,6 @@ foreach ($r in $rows) {
   }
   elseif ($ghAvailable) {
     try {
-      # If repo exists, gh repo view returns 0; else throws
       $null = & gh repo view $fullGhRepo --json name --jq '.name'
       $existsInGh = 'Yes'
     } catch {
@@ -165,7 +171,7 @@ foreach ($r in $rows) {
   $results.Add($result)
 }
 
-# Summary counts
+# Summary
 $total   = $results.Count
 $yesCnt  = ($results | Where-Object { $_.exists_in_github -eq 'Yes' }).Count
 $noCnt   = ($results | Where-Object { $_.exists_in_github -eq 'No' }).Count
@@ -182,7 +188,7 @@ Write-Log "Skipped: $skipCnt"
 Write-Log "Unknown: $unkCnt"
 Write-Log ""
 
-# Save artifacts: JSON & optional CSV summary
+# Save artifacts
 try {
   $results | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $jsonPath -Encoding UTF8
   Write-Log "Saved JSON: $jsonPath"
@@ -190,10 +196,10 @@ try {
   Write-Log "Failed to write JSON results: $_"
 }
 
-# Optional table to console
+# Console table
 $results | Select-Object github_org, github_repo, exists_in_github, notes | Format-Table -AutoSize | Out-Host
 
-# Optional CSV table for convenience
+# CSV summary
 $summaryCsvPath = "validation_summary.csv"
 try {
   $results | Export-Csv -LiteralPath $summaryCsvPath -NoTypeInformation
@@ -202,6 +208,5 @@ try {
   Write-Log "Failed to write CSV summary: $_"
 }
 
-# Exit code: if any "No", set non-zero? (You can choose behavior)
-# For now we don't fail the job; comment/uncomment to enforce:
-#
+# Non-fatal: keep job success even if some repos missing
+# Uncomment to fail when missing repos exist:
