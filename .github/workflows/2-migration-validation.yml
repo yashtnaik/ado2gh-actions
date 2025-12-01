@@ -9,19 +9,6 @@ on:
         required: true
         default: 'repos.csv'
         type: string
-      # gh_org:
-      #   description: 'GitHub organization name'
-      #   required: true
-      #   type: string
-      # trigger_mannequins:
-      #   description: 'Automatically trigger mannequin validation after migration validation'
-      #   required: false
-      #   default: false
-      #   type: boolean
-      # github_org:
-      #   description: 'GitHub organization name (required if triggering mannequins)'
-      #   required: false
-      #   type: string
 
 permissions:
   contents: read
@@ -32,7 +19,7 @@ jobs:
     name: Validate Migrated Repositories
     runs-on: windows-latest
     timeout-minutes: 120
-    environment: PAT tokens
+    environment: PAT tokens  # If your org demands approval to access secrets
 
     steps:
       - name: Checkout Repository
@@ -40,20 +27,13 @@ jobs:
 
       - name: Setup GitHub CLI
         shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT }}   # authenticate gh if needed
         run: |
           gh --version
+          gh auth status || gh auth login --with-token <<< "$env:GH_TOKEN"
           git config --global user.name "GitHub Actions"
           git config --global user.email "actions@github.com"
-
-      - name: Install gh ado2gh extension
-        shell: pwsh
-        env:
-          GH_TOKEN: ${{ secrets.GH_PAT }}
-        run: |
-          Write-Host "Installing gh ado2gh extension..."
-          gh extension install github/gh-ado2gh
-          Write-Host "Verifying installation..."
-          gh ado2gh version
 
       - name: Validate CSV File
         shell: pwsh
@@ -69,8 +49,7 @@ jobs:
 
           # Validate CSV structure
           $csv = Import-Csv -LiteralPath $csvPath
-          $requiredColumns = @('org', 'teamproject', 'repo', 'github_org', 'github_repo')
-
+          $requiredColumns = @('org', 'teamproject', 'repo', 'url', 'github_org', 'github_repo')  # core columns needed
           $csvColumns = $csv[0].PSObject.Properties.Name
           $missingColumns = $requiredColumns | Where-Object { $_ -notin $csvColumns }
 
@@ -82,21 +61,40 @@ jobs:
           Write-Host "✅ CSV validation passed"
           Write-Host "Total repositories to validate: $($csv.Count)"
 
-      # -------- FIXED: provide env vars and also pass explicit parameters --------
+      - name: Derive GH_ORG from CSV and export for next steps
+        shell: pwsh
+        env:
+          CSV_PATH: ${{ inputs.csv_path }}
+        run: |
+          # Read first row org from 'github_org' (fallback GH_ORG column)
+          $row = Import-Csv -LiteralPath $env:CSV_PATH | Select-Object -First 1
+          if (-not $row) { Write-Error "CSV has no rows."; exit 1 }
+
+          $ghOrgFromCsv = $row.github_org
+          if (-not $ghOrgFromCsv) { $ghOrgFromCsv = $row.GH_ORG }
+
+          if (-not $ghOrgFromCsv) {
+            Write-Error "CSV is missing 'github_org' (or 'GH_ORG') value in the first row."
+            exit 1
+          }
+
+          Write-Host "Derived GH_ORG from CSV: $ghOrgFromCsv"
+          "GH_ORG=$ghOrgFromCsv" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "CSV_PATH=${{ inputs.csv_path }}" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
       - name: Run Migration Validation
         shell: pwsh
         env:
           GH_PAT:   ${{ secrets.GH_PAT }}
           ADO_PAT:  ${{ secrets.ADO_PAT }}
           GH_TOKEN: ${{ secrets.GH_PAT }}
-          CSV_PATH: ${{ inputs.csv_path }}    # FIX: make $env:CSV_PATH available
-          GH_ORG:   ${{ inputs.gh_org }}      # FIX: make $env:GH_ORG available
+          # CSV_PATH and GH_ORG are already exported via $GITHUB_ENV by previous step
         run: |
           Write-Host "Validation in progress... please wait ..."
-          # Pass parameters explicitly (so we don't depend solely on env defaults)
+          # Pass explicit parameters (and envs exist too for defaults)
           .\scripts\2_migration_validation.ps1 `
-            -CsvPath "${{ inputs.csv_path }}" `
-            -GhOrg   "${{ inputs.gh_org }}"
+            -CsvPath "$env:CSV_PATH" `
+            -GhOrg   "$env:GH_ORG"
 
       - name: Upload Validation Results
         if: always()
@@ -104,8 +102,9 @@ jobs:
         with:
           name: validation-results-${{ github.run_number }}
           path: |
-            validation-*.txt
-            validation-*.json
+            validation-log-*.txt
+            validation-results-*.json
+            validation_summary.csv
           retention-days: 30
 
       - name: Generate Workflow Summary
@@ -127,4 +126,4 @@ jobs:
             Write-Host '```' >> $env:GITHUB_STEP_SUMMARY
             Write-Host "" >> $env:GITHUB_STEP_SUMMARY
             Write-Host "📊 Full validation results available in workflow artifacts" >> $env:GITHUB_STEP_SUMMARY
-         
+          }
