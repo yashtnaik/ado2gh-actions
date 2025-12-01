@@ -238,7 +238,7 @@ jobs:
           # Write Markdown table to the job summary
           Add-Content -Path $summaryPath -Value "## Validate Migrated Repositories — Status Table"
           Add-Content -Path $summaryPath -Value ""
-          Add-Content -Path $summaryPath -Value "| Repository | Branch Count | Commit Count | Latest SHA | Overall |"
+          Add-Content -Path $summaryPath -Value "`| Repository `| Branch Count `| Commit Count `| Latest SHA `| Overall `|"
           Add-Content -Path $summaryPath -Value "|---|---|---|---|---|"
       
           foreach ($row in $repoSummaries) {
