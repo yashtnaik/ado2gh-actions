@@ -74,106 +74,116 @@ jobs:
           # .\2_migration_validation.ps1
 
       # Build a clean table-only summary with ✅/❌ by parsing the log your script wrote
-      - name: Generate Table Summary (tick marks only)
+      
+      - name: Generate Table Summary (tick marks only, robust)
         shell: powershell
         run: |
           $summaryPath = $env:GITHUB_STEP_SUMMARY
-          $today = (Get-Date).ToString('yyyyMMdd')
-          $logFile = "validation-log-$today.txt"
-
-          if (-not (Test-Path -LiteralPath $logFile)) {
-            Write-Warning "Log file not found: $logFile. Skipping summary table."
+      
+          # Find the latest validation log file (in case date format drifted)
+          $logCandidates = Get-ChildItem -File -Filter "validation-log-*.txt" | Sort-Object LastWriteTime -Descending
+          if (@($logCandidates).Count -eq 0) {
+            Write-Warning "No validation-log-*.txt found. Skipping summary table."
             exit 0
           }
-
-          $lines = Get-Content -LiteralPath $logFile
-
-          # Collect per-repo status
-          $repoSummaries = @()
+          $logFile = $logCandidates[0].FullName
+          Write-Host "Using log file: $logFile"
+      
+          # Read with UTF-8 to preserve ✅/❌ in the summary
+          $lines = Get-Content -LiteralPath $logFile -Encoding UTF8
+      
+          # Helper: finalize a repo block into a table row object
+          function Finalize-Row {
+            param([hashtable]$row)
+      
+            $commitStatus = if ($row.AnyCommitMismatch) { '❌ Not Matching' } else { '✅ Matching' }
+            $shaStatus    = if ($row.AnyShaMismatch)    { '❌ Not Matching' } else { '✅ Matching' }
+      
+            $overall = if (
+              ($row.BranchCount -eq '✅ Matching') -and
+              ($commitStatus     -eq '✅ Matching') -and
+              ($shaStatus        -eq '✅ Matching')
+            ) { '✅' } else { '❌' }
+      
+            return [pscustomobject]@{
+              Repository   = $row.Repo
+              BranchCount  = $row.BranchCount
+              CommitCount  = $commitStatus
+              LatestSHA    = $shaStatus
+              Overall      = $overall
+            }
+          }
+      
+          # Parse the log using a simple state machine
+          $repoSummaries = New-Object System.Collections.Generic.List[object]
           $current = $null
-
+      
           foreach ($line in $lines) {
-            # Start of repo block
-            if ($line -match '\] Validating migration:\s+(?<repo>.+)$') {
+            # Start of repo block: "[...] Validating migration: <repo>"
+            if ($line -match '^\[.+\]\s+Validating migration:\s+(?<repo>.+)$') {
               if ($null -ne $current) {
-                # finalize previous if wasn't closed cleanly
-                $current.CommitCount = if ($current.AnyCommitMismatch) { '❌ Not Matching' } else { '✅ Matching' }
-                $current.LatestSHA   = if ($current.AnyShaMismatch)    { '❌ Not Matching' } else { '✅ Matching' }
-                $current.Overall     = if ($current.BranchCount -eq '✅ Matching' -and $current.CommitCount -eq '✅ Matching' -and $current.LatestSHA -eq '✅ Matching') { '✅' } else { '❌' }
-                $repoSummaries += $current
+                $repoSummaries.Add( (Finalize-Row -row $current) )
               }
-
               $repoName = $matches['repo'].Trim()
-              $current = [ordered]@{
+              $current = @{
                 Repo              = $repoName
                 BranchCount       = ''
-                CommitCount       = ''
-                LatestSHA         = ''
-                Overall           = ''
                 AnyCommitMismatch = $false
                 AnyShaMismatch    = $false
               }
               continue
             }
-
-            if ($null -ne $current) {
-              # Branch count status for the repo
-              if ($line -match 'Branch Count:.*\|\s*(?<status>✅ Matching|❌ Not Matching)$') {
-                $current.BranchCount = $matches['status']
-                continue
-              }
-
-              # Per-branch commit count line
-              if ($line -match "Branch '.*': .*Commits=.*\|\s*GitHub Commits=.*\|\s*(?<status>✅ Matching|❌ Not Matching)$") {
-                if ($matches['status'] -eq '❌ Not Matching') { $current.AnyCommitMismatch = $true }
-                continue
-              }
-
-              # Per-branch latest SHA line
-              if ($line -match "Branch '.*': .*SHA=.*\|\s*GitHub SHA=.*\|\s*(?<status>✅ Matching|❌ Not Matching)$") {
-                if ($matches['status'] -eq '❌ Not Matching') { $current.AnyShaMismatch = $true }
-                continue
-              }
-
-              # End of repo block
-              if ($line -match '\] Validation complete for\s+(?<repo>.+)$') {
-                $current.CommitCount = if ($current.AnyCommitMismatch) { '❌ Not Matching' } else { '✅ Matching' }
-                $current.LatestSHA   = if ($current.AnyShaMismatch)    { '❌ Not Matching' } else { '✅ Matching' }
-                $current.Overall     = if ($current.BranchCount -eq '✅ Matching' -and $current.CommitCount -eq '✅ Matching' -and $current.LatestSHA -eq '✅ Matching') { '✅' } else { '❌' }
-                $repoSummaries += $current
-                $current = $null
-                continue
-              }
+      
+            if ($null -eq $current) { continue }
+      
+            # Branch count line: "... Branch Count: ADO=... | GitHub=... | ✅ Matching"
+            if ($line -match '^\[.+\]\s+Branch Count:.*\|\s+(?<status>✅ Matching|❌ Not Matching)$') {
+              $current.BranchCount = $matches['status']
+              continue
+            }
+      
+            # Per-branch commit count line: "... Branch 'x': ADO Commits=... | GitHub Commits=... | ✅/❌ Matching"
+            if ($line -match "^\[.+\]\s+Branch '.+?': .*Commits=.*\|\s*GitHub Commits=.*\|\s*(?<status>✅ Matching|❌ Not Matching)$") {
+              if ($matches['status'] -eq '❌ Not Matching') { $current.AnyCommitMismatch = $true }
+              continue
+            }
+      
+            # Per-branch latest SHA line: "... Branch 'x': ADO SHA=... | GitHub SHA=... | ✅/❌ Matching"
+            if ($line -match "^\[.+\]\s+Branch '.+?': .*SHA=.*\|\s*GitHub SHA=.*\|\s*(?<status>✅ Matching|❌ Not Matching)$") {
+              if ($matches['status'] -eq '❌ Not Matching') { $current.AnyShaMismatch = $true }
+              continue
+            }
+      
+            # End of repo block: "[...] Validation complete for <repo>"
+            if ($line -match '^\[.+\]\s+Validation complete for\s+(?<repo>.+)$') {
+              $repoSummaries.Add( (Finalize-Row -row $current) )
+              $current = $null
+              continue
             }
           }
-
-          # If file ended without "Validation complete for", finalize the last one
+      
+          # Finalize last repo if file ended mid-block
           if ($null -ne $current) {
-            $current.CommitCount = if ($current.AnyCommitMismatch) { '❌ Not Matching' } else { '✅ Matching' }
-            $current.LatestSHA   = if ($current.AnyShaMismatch)    { '❌ Not Matching' } else { '✅ Matching' }
-            $current.Overall     = if ($current.BranchCount -eq '✅ Matching' -and $current.CommitCount -eq '✅ Matching' -and $current.LatestSHA -eq '✅ Matching') { '✅' } else { '❌' }
-            $repoSummaries += $current
+            $repoSummaries.Add( (Finalize-Row -row $current) )
           }
-
-          # Write Markdown table to job summary
+      
+          # Write Markdown table to the job summary
           Add-Content -Path $summaryPath -Value "## Validate Migrated Repositories — Status Table"
           Add-Content -Path $summaryPath -Value ""
           Add-Content -Path $summaryPath -Value "| Repository | Branch Count | Commit Count | Latest SHA | Overall |"
           Add-Content -Path $summaryPath -Value "|---|---|---|---|---|"
-
+      
           foreach ($row in $repoSummaries) {
-            $line = "| $($row.Repo) | $($row.BranchCount) | $($row.CommitCount) | $($row.LatestSHA) | $($row.Overall) |"
-            Add-Content -Path $summaryPath -Value $line
+            $lineMd = "| $($row.Repository) | $($row.BranchCount) | $($row.CommitCount) | $($row.LatestSHA) | $($row.Overall) |"
+            Add-Content -Path $summaryPath -Value $lineMd
           }
-
-          # Optional totals row
-          $total   = $repoSummaries.Count
-          $allOK   = ($repoSummaries | Where-Object { $_.Overall -eq '✅' }).Count
-          $notOK   = ($repoSummaries | Where-Object { $_.Overall -eq '❌' }).Count
-
+      
+          # Totals
+          $total = @($repoSummaries).Count
+          $ok    = @( $repoSummaries | Where-Object { $_.Overall -eq '✅' } ).Count
+          $bad   = @( $repoSummaries | Where-Object { $_    $bad   = @( $repoSummaries | Where-Object { $_.Overall -eq '❌' } ).Count
+      
           Add-Content -Path $summaryPath -Value ""
-          Add-Content -Path $summaryPath -Value "**Totals:** $allOK ✅ / $notOK ❌ (out of $total          Add-Content -Path $summaryPath -Value "**Totals:** $allOK ✅ / $notOK ❌ (out of $total repos)"
-
       - name: Upload Validation Artifacts
         if: always()
         uses: actions/upload-artifact@v4
