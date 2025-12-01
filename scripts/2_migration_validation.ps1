@@ -2,25 +2,32 @@
 #requires -Version 7.0
 <#
 .SYNOPSIS
-  ADO → GitHub post-migration validation.
-.DESCRIPTION
-  Reads repositories from a CSV and performs validation checks against the migrated repos in the target GitHub org.
-  Script is dynamic: values come from environment variables but can be overridden via parameters.
+  ADO → GitHub post-migration validation
 
-  Expected environment variables (all optional if you pass parameters):
-    - CSV_PATH        : Path to CSV containing repositories (header-only ref is fine; we'll validate existence)
-    - GH_ORG          : Target GitHub organization
-    - GH_PAT          : GitHub token (if the script uses gh/REST calls internally)
-    - ADO_ORG_URL     : (optional if needed by your validation logic)
+.DESCRIPTION
+  Validates migrated repositories by reading rows from a CSV and performing checks
+  (e.g., existence in GitHub org). The script is dynamic: values come from env vars
+  but can be overridden via parameters. If GhOrg is not provided, it is derived from
+  the CSV's first row `github_org` (fallback `GH_ORG` column).
 
 .PARAMETER CsvPath
-  Path to CSV file. Defaults to $env:CSV_PATH.
+  Path to CSV (defaults to $env:CSV_PATH)
 
 .PARAMETER GhOrg
-  GitHub organization. Defaults to $env:GH_ORG.
+  GitHub organization (defaults to $env:GH_ORG, otherwise derived from CSV)
+
+.EXPECTED CSV COLUMNS
+  org, teamproject, repo, url, last-push-date, pipeline-count,
+  compressed-repo-size-in-bytes, most-active-contributor, pr-count,
+  commits-past-year, github_org, github_repo, gh_repo_visibility
+
+.OUTPUTS
+  - validation-log-<timestamp>.txt
+  - validation-results-<timestamp>.json
+  - validation_summary.csv (optional, convenient table)
 
 .NOTES
-  Keep ONLY comments or `#requires` above `param(...)`. No executable statements before `param`.
+  Only comments and #requires may appear above the param(...) block.
 #>
 
 param(
@@ -32,98 +39,169 @@ param(
 )
 
 # ---- Executable statements start after param ----
-
-# Prefer strict mode after param
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-# Optional: read GH_PAT if needed by your internal validation calls
-$ghPat = $env:GH_PAT
+# Timestamp for artifacts
+$stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
+$logPath  = "validation-log-$stamp.txt"
+$jsonPath = "validation-results-$stamp.json"
 
-# Basic input validation
+# Helper to log both to console and file
+function Write-Log {
+  param([string]$Message)
+  Write-Host $Message
+  Add-Content -LiteralPath $logPath -Value $Message
+}
+
+# Validate CSV path
 if (-not $CsvPath) {
   throw "CSV path is missing. Set env CSV_PATH or pass -CsvPath."
 }
 if (-not (Test-Path -LiteralPath $CsvPath)) {
   throw "CSV path '$CsvPath' does not exist. Check the path or ensure the file is checked out."
 }
-if (-not $GhOrg) {
-  throw "GH org is missing. Set env GH_ORG or pass -GhOrg."
-}
 
-Write-Host "Validation in progress... please wait ..."
-
-# ===== Your existing validation logic =====
-# The below is a safe scaffold—plug in your real checks.
-# It keeps the script dynamic and prints a concise summary.
-
-# Load CSV
+# Read the CSV
 try {
-  $repos = Import-Csv -LiteralPath $CsvPath
+  $rows = Import-Csv -LiteralPath $CsvPath
 } catch {
   throw "Failed to read CSV '$CsvPath'. $_"
 }
 
-if (-not $repos) {
-  Write-Warning "CSV '$CsvPath' is empty. Nothing to validate."
-  return
+if (-not $rows -or $rows.Count -eq 0) {
+  throw "CSV '$CsvPath' has no data rows."
 }
 
-# Example: Ensure GH CLI is authenticated if you're using it downstream
-if ($ghPat) {
-  # This sets GH token for the session if needed (optional)
-  $env:GH_TOKEN = $ghPat
-}
-
-# Placeholder: perform your repo validation loop
-$results = @()
-foreach ($r in $repos) {
-  # Assuming CSV has a column like 'RepoName' or 'Repository'
-  $repoName = $r.RepoName
-  if (-not $repoName) {
-    $repoName = $r.Repository
-  }
-
-  if (-not $repoName) {
-    $results += [pscustomobject]@{
-      Repository = "(missing name)"
-      Status     = "Skipped"
-      Notes      = "No repository name in CSV row."
-    }
-    continue
-  }
-
-  # ---- Replace the sample check with your actual validation logic ----
-  # Example simple check: does the repo exist in GH?
-  # Using gh CLI (optional):
-  # $exists = $false
-  # try {
-  #   $null = gh repo view "$GhOrg/$repoName" --json name --jq .name
-  #   $exists = $true
-  # } catch {
-  #   $exists = $false
-  # }
-
-  # For illustration, we mark every repo as Validated
-  $results += [pscustomobject]@{
-    Repository = "$GhOrg/$repoName"
-    Status     = "Validated"
-    Notes      = "Sample validation succeeded (replace with real checks)."
+# Derive GhOrg from CSV if missing
+if (-not $GhOrg) {
+  $first = $rows | Select-Object -First 1
+  $GhOrg = $first.github_org
+  if (-not $GhOrg) { $GhOrg = $first.GH_ORG } # fallback if column named GH_ORG
+  if (-not $GhOrg) {
+    throw "GH org is missing. Provide -GhOrg, set env GH_ORG, or include 'github_org' in the CSV."
   }
 }
 
-# Output a summary table
-Write-Host ""
-Write-Host "======================"
-Write-Host "Validation Summary"
-Write-Host "======================"
-$results | Format-Table -AutoSize | Out-Host
+Write-Host "Validation in progress... please wait ..."
 
-# Optionally write results to a CSV for artifacts
-$summaryPath = Join-Path (Split-Path -Parent $CsvPath) "validation_summary.csv"
+# Check GH CLI availability
+$ghAvailable = $false
 try {
-  $results | Export-Csv -LiteralPath $summaryPath -NoTypeInformation
-  Write-Host "Saved summary: $summaryPath"
+  $null = & gh --version
+  $ghAvailable = $true
 } catch {
-  Write-Warning "Failed to write summary CSV. $_"
+  $ghAvailable = $false
 }
+
+# If GH_PAT is set, set GH_TOKEN for gh CLI
+if ($env:GH_PAT) {
+  $env:GH_TOKEN = $env:GH_PAT
+}
+
+$results = New-Object System.Collections.Generic.List[object]
+
+# Iterate rows and perform checks
+foreach ($r in $rows) {
+  $org                          = $r.org
+  $teamProject                  = $r.teamproject
+  $repo                         = $r.repo
+  $sourceUrl                    = $r.url
+  $lastPushDate                 = $r.'last-push-date'
+  $pipelineCount                = $r.'pipeline-count'
+  $compressedSizeBytes          = $r.'compressed-repo-size-in-bytes'
+  $mostActiveContributor        = $r.'most-active-contributor'
+  $prCount                      = $r.'pr-count'
+  $commitsPastYear              = $r.'commits-past-year'
+  $rowGhOrg                     = $r.github_org
+  $rowGhRepo                    = $r.github_repo
+  $ghRepoVisibility             = $r.gh_repo_visibility
+
+  # Prefer per-row org from CSV; fallback to derived/global GhOrg
+  $targetOrg = if ($rowGhOrg) { $rowGhOrg } else { $GhOrg }
+  $targetRepoName = if ($rowGhRepo) { $rowGhRepo } else { $repo }
+  $fullGhRepo = if ($targetOrg -and $targetRepoName) { "$targetOrg/$targetRepoName" } else { $null }
+
+  $existsInGh   = 'Unknown'
+  $notes        = @()
+
+  if ($null -eq $fullGhRepo) {
+    $existsInGh = 'Skipped'
+    $notes += "Missing target org/repo name."
+  }
+  elseif ($ghAvailable) {
+    try {
+      # If repo exists, gh repo view returns 0; else throws
+      $null = & gh repo view $fullGhRepo --json name --jq '.name'
+      $existsInGh = 'Yes'
+    } catch {
+      $existsInGh = 'No'
+      $notes += "Repo not found in GH org."
+    }
+  } else {
+    $existsInGh = 'Unknown'
+    $notes += "gh CLI unavailable on runner; existence check skipped."
+  }
+
+  $result = [pscustomobject]@{
+    source_org                 = $org
+    source_teamproject         = $teamProject
+    source_repo                = $repo
+    source_url                 = $sourceUrl
+    last_push_date             = $lastPushDate
+    pipeline_count             = $pipelineCount
+    compressed_repo_size_bytes = $compressedSizeBytes
+    most_active_contributor    = $mostActiveContributor
+    pr_count                   = $prCount
+    commits_past_year          = $commitsPastYear
+    github_org                 = $targetOrg
+    github_repo                = $targetRepoName
+    gh_repo_visibility         = $ghRepoVisibility
+    gh_full_name               = $fullGhRepo
+    exists_in_github           = $existsInGh
+    notes                      = ($notes -join '; ')
+  }
+
+  $results.Add($result)
+}
+
+# Summary counts
+$total   = $results.Count
+$yesCnt  = ($results | Where-Object { $_.exists_in_github -eq 'Yes' }).Count
+$noCnt   = ($results | Where-Object { $_.exists_in_github -eq 'No' }).Count
+$skipCnt = ($results | Where-Object { $_.exists_in_github -eq 'Skipped' }).Count
+$unkCnt  = ($results | Where-Object { $_.exists_in_github -eq 'Unknown' }).Count
+
+Write-Log "======================"
+Write-Log "Validation Summary"
+Write-Log "======================"
+Write-Log "Total rows: $total"
+Write-Log "Exists in GitHub: $yesCnt"
+Write-Log "Missing in GitHub: $noCnt"
+Write-Log "Skipped: $skipCnt"
+Write-Log "Unknown: $unkCnt"
+Write-Log ""
+
+# Save artifacts: JSON & optional CSV summary
+try {
+  $results | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $jsonPath -Encoding UTF8
+  Write-Log "Saved JSON: $jsonPath"
+} catch {
+  Write-Log "Failed to write JSON results: $_"
+}
+
+# Optional table to console
+$results | Select-Object github_org, github_repo, exists_in_github, notes | Format-Table -AutoSize | Out-Host
+
+# Optional CSV table for convenience
+$summaryCsvPath = "validation_summary.csv"
+try {
+  $results | Export-Csv -LiteralPath $summaryCsvPath -NoTypeInformation
+  Write-Log "Saved CSV summary: $summaryCsvPath"
+} catch {
+  Write-Log "Failed to write CSV summary: $_"
+}
+
+# Exit code: if any "No", set non-zero? (You can choose behavior)
+# For now we don't fail the job; comment/uncomment to enforce:
+#
